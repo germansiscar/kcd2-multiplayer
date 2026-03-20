@@ -8,4 +8,8 @@
     <AssemblyName>KcdMpClient</AssemblyName>
   </PropertyGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="../KcdMp.Shared/KcdMp.Shared.csproj" />
+  </ItemGroup>
+
 </Project>
