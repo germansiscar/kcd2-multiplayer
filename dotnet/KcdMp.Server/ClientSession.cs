@@ -1,7 +1,6 @@
-using System.Buffers.Binary;
 using System.Net.Sockets;
-using System.Text;
 using System.Threading.Channels;
+using KcdMp.Shared.Protocol;
 
 namespace KcdMp.Server;
 
@@ -47,24 +46,18 @@ public class ClientSession
         try
         {
             // --- Handshake ---
-            var header = new byte[3];
-            await ReadExactAsync(header);
-
-            if (header[0] != 0x00)
+            var hsPacket = await _stream.ReadPacketAsync();
+            if (hsPacket.Type != PacketType.Handshake)
             {
-                Console.WriteLine($"[!] Client sent bad handshake type 0x{header[0]:X2}, dropping.");
+                Console.WriteLine($"[!] Client sent bad handshake type 0x{(byte)hsPacket.Type:X2}, dropping.");
                 return;
             }
-
-            int nameLen = header[1]; // single byte, max 255
-            var nameBytes = new byte[nameLen];
-            await ReadExactAsync(nameBytes);
-            Name = Encoding.UTF8.GetString(nameBytes);
+            Name = PacketReader.ReadUtf8(hsPacket.Payload, 0, hsPacket.Payload.Length);
 
             Console.WriteLine($"[+] '{Name}' connected (id={Id}) from {_tcp.Client.RemoteEndPoint}. Clients: active");
 
             // Send Ack with assigned ID
-            EnqueueRaw(BuildPacket(0xFF, [Id]));
+            EnqueueRaw(PacketWriter.Ack(Id));
 
             // Broadcast this client's name to all others; send existing names to this client
             _server.BroadcastName(this);
@@ -72,42 +65,20 @@ public class ClientSession
 
             // --- Position receive loop ---
             // Accepts both v1 (16 bytes: x,y,z,rotZ) and v2 (17 bytes: x,y,z,rotZ,flags)
-            var posPayload = new byte[17];
             while (true)
             {
-                await ReadExactAsync(header);
-                int type = header[0];
-                int payloadLen = BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(1));
+                var packet = await _stream.ReadPacketAsync();
 
-                if (type == 0x04 && payloadLen == 8)
+                if (packet.Type == PacketType.Ping && packet.Payload.Length == 8)
                 {
-                    // Ping → echo back as Pong with same 8-byte timestamp
-                    var tsBytes = new byte[8];
-                    await ReadExactAsync(tsBytes);
-                    EnqueueRaw(BuildPacket(0x05, tsBytes));
+                    EnqueueRaw(PacketWriter.Pong(packet.Payload));
                     continue;
                 }
 
-                if (type != 0x01 || (payloadLen != 16 && payloadLen != 17))
-                {
-                    // Skip unknown/malformed packet
-                    if (payloadLen > 0)
-                    {
-                        var skip = new byte[payloadLen];
-                        await ReadExactAsync(skip);
-                    }
+                if (packet.Type != PacketType.Position || (packet.Payload.Length != 16 && packet.Payload.Length != 17))
                     continue;
-                }
 
-                // Read exactly payloadLen bytes (16 or 17)
-                await ReadExactAsync(posPayload, payloadLen);
-
-                float x    = ReadFloat(posPayload, 0);
-                float y    = ReadFloat(posPayload, 4);
-                float z    = ReadFloat(posPayload, 8);
-                float rotZ = ReadFloat(posPayload, 12);
-                byte  flags = payloadLen >= 17 ? posPayload[16] : (byte)0x00;
-
+                var (x, y, z, rotZ, flags) = PacketReader.ParsePosition(packet.Payload);
                 _server.Broadcast(this, x, y, z, rotZ, flags);
             }
         }
@@ -125,30 +96,15 @@ public class ClientSession
 
     /// <summary>Thread-safe: enqueue a Ghost packet to be sent to this client.</summary>
     public void EnqueueGhost(byte ghostId, float x, float y, float z, float rotZ, byte flags)
-    {
-        var payload = new byte[18];
-        payload[0] = ghostId;
-        WriteFloat(payload, 1, x);
-        WriteFloat(payload, 5, y);
-        WriteFloat(payload, 9, z);
-        WriteFloat(payload, 13, rotZ);
-        payload[17] = flags;
-        EnqueueRaw(BuildPacket(0x02, payload));
-    }
+        => EnqueueRaw(PacketWriter.Ghost(ghostId, x, y, z, rotZ, flags));
 
     /// <summary>Thread-safe: enqueue a Disconnect packet (0x06) to be sent to this client.</summary>
-    public void EnqueueDisconnect(byte ghostId) =>
-        EnqueueRaw(BuildPacket(0x06, [ghostId]));
+    public void EnqueueDisconnect(byte ghostId)
+        => EnqueueRaw(PacketWriter.DisconnectPacket(ghostId));
 
     /// <summary>Thread-safe: enqueue a Name packet (0x03) to be sent to this client.</summary>
     public void EnqueueName(byte ghostId, string name)
-    {
-        var nameBytes = Encoding.UTF8.GetBytes(name);
-        var payload = new byte[1 + nameBytes.Length];
-        payload[0] = ghostId;
-        nameBytes.CopyTo(payload, 1);
-        EnqueueRaw(BuildPacket(0x03, payload));
-    }
+        => EnqueueRaw(PacketWriter.NamePacket(ghostId, name));
 
     private void EnqueueRaw(byte[] packet) =>
         _writeQueue.Writer.TryWrite(packet);
@@ -162,33 +118,4 @@ public class ClientSession
         }
     }
 
-    // ---- Helpers ----
-
-    private static byte[] BuildPacket(byte type, byte[] payload)
-    {
-        var packet = new byte[3 + payload.Length];
-        packet[0] = type;
-        BinaryPrimitives.WriteUInt16LittleEndian(packet.AsSpan(1), (ushort)payload.Length);
-        payload.CopyTo(packet, 3);
-        return packet;
-    }
-
-    private static float ReadFloat(byte[] buf, int offset) =>
-        BitConverter.Int32BitsToSingle(BinaryPrimitives.ReadInt32LittleEndian(buf.AsSpan(offset)));
-
-    private static void WriteFloat(byte[] buf, int offset, float value) =>
-        BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(offset), BitConverter.SingleToInt32Bits(value));
-
-    private Task ReadExactAsync(byte[] buffer) => ReadExactAsync(buffer, buffer.Length);
-
-    private async Task ReadExactAsync(byte[] buffer, int count)
-    {
-        int offset = 0;
-        while (offset < count)
-        {
-            int n = await _stream.ReadAsync(buffer, offset, count - offset);
-            if (n == 0) throw new EndOfStreamException();
-            offset += n;
-        }
-    }
 }
