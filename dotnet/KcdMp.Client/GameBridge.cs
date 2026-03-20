@@ -3,6 +3,8 @@ using System.Globalization;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.RegularExpressions;
+using Serilog;
+using KcdMp.Shared.Protocol;
 
 namespace KcdMp.Client;
 
@@ -22,13 +24,14 @@ namespace KcdMp.Client;
 ///     RotStateIntervalMs (80 ms). Cached values are used by the position loop.
 ///     This cuts per-tick latency from ~50 ms to ~15 ms.
 /// </summary>
-public partial class GameBridge(string serverHost, int serverPort, string name, string gameApiBase)
+public partial class GameBridge(string serverHost, int serverPort, string password, string name, string gameApiBase, Serilog.ILogger? logger = null)
 {
     private const int TickMs           = 10;
     private const int RotStateIntervalMs = 80;
     private const float PosThreshold  = 0.05f;
     private const float RotThreshold  = 0.02f;
 
+    private readonly ILogger _logger = logger ?? Log.Logger;
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromMilliseconds(800) };
 
     // Last pushed position (for change detection)
@@ -56,12 +59,11 @@ public partial class GameBridge(string serverHost, int serverPort, string name, 
             catch (OperationCanceledException) { break; }
             catch (Exception ex)
             {
-                Console.WriteLine($"[!] Unexpected error: {ex.Message}");
+                _logger.Error(ex, "[!] Unexpected error");
             }
 
             if (ct.IsCancellationRequested) break;
-            Console.WriteLine("Reconnecting in 3 s...");
-            Console.WriteLine();
+            _logger.Information("Reconnecting in 3 s...");
             await Task.Delay(3000, ct).ContinueWith(_ => { });
         }
     }
@@ -72,7 +74,7 @@ public partial class GameBridge(string serverHost, int serverPort, string name, 
 
     private async Task WaitForGameAsync(CancellationToken ct = default)
     {
-        Console.WriteLine("Waiting for game to load a save...");
+        _logger.Information("Waiting for game to load a save...");
         while (!ct.IsCancellationRequested)
         {
             try
@@ -81,7 +83,7 @@ public partial class GameBridge(string serverHost, int serverPort, string name, 
                 var m = GameTimeRegex().Match(xml);
                 if (m.Success && float.TryParse(m.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out float t) && t > 0)
                 {
-                    Console.WriteLine("Game ready!");
+                    _logger.Information("Game ready!");
                     return;
                 }
             }
@@ -99,34 +101,40 @@ public partial class GameBridge(string serverHost, int serverPort, string name, 
     {
         using var tcp = new TcpClient();
 
-        Console.WriteLine($"Connecting to relay server {serverHost}:{serverPort}...");
+        _logger.Information("Connecting to relay server {ServerHost}:{ServerPort}...", serverHost, serverPort);
         try
         {
             await tcp.ConnectAsync(serverHost, serverPort);
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[!] Cannot connect: {ex.Message}");
+            _logger.Error(ex, "[!] Cannot connect");
             return;
         }
 
         var stream = tcp.GetStream();
 
+        // --- Auth (if password set) ---
+        if (!string.IsNullOrEmpty(password))
+        {
+            await stream.WriteAsync(PacketWriter.Auth(password));
+            var authResult = await stream.ReadPacketAsync();
+            var (ok, message) = PacketReader.ParseAuthResult(authResult.Payload);
+            if (!ok)
+            {
+                _logger.Error("[!] Auth failed: {Message}", message);
+                return;
+            }
+            _logger.Information("Authenticated.");
+        }
+
         // --- Handshake ---
-        var nameBytes = Encoding.UTF8.GetBytes(name);
-        var handshake = new byte[3 + nameBytes.Length];
-        handshake[0] = 0x00;
-        handshake[1] = (byte)nameBytes.Length; // payloadLen low byte (name ≤ 255 chars)
-        handshake[2] = 0x00;                   // payloadLen high byte
-        nameBytes.CopyTo(handshake, 3);
-        await stream.WriteAsync(handshake);
+        await stream.WriteAsync(PacketWriter.Handshake(name));
 
         // --- Ack (S→C  0xFF [id:1]) ---
-        var ack = new byte[4]; // header(3) + id(1)
-        await ReadExactAsync(stream, ack);
-        byte myId = ack[3];
-        Console.WriteLine($"Connected! Assigned id={myId}");
-        Console.WriteLine();
+        var ackPacket = await stream.ReadPacketAsync();
+        byte myId = ackPacket.Payload[0];
+        _logger.Information("Connected! Assigned id={MyId}", myId);
 
         _hasPushed = false;
 
@@ -167,13 +175,15 @@ public partial class GameBridge(string serverHost, int serverPort, string name, 
                         _hasPushed = true;
                         _lastX = x; _lastY = y; _lastZ = z; _lastRotZ = rotZ;
                         await SendPositionAsync(stream, x, y, z, rotZ, riding);
-                        Console.WriteLine($"[pos] {x:F1} {y:F1} {z:F1}  rot={rotZ:F2}  riding={riding}  read={sw.ElapsedMilliseconds}ms");
+                        _logger.Information("[pos] {X:F1} {Y:F1} {Z:F1}  rot={RotZ:F2}  riding={Riding}  read={ReadMs}ms",
+                            x, y, z, rotZ, riding, sw.ElapsedMilliseconds);
                     }
                 }
 
                 // Print average read time every 100 ticks
                 if (tickCount % 100 == 0)
-                    Console.WriteLine($"[stat] avg read={totalReadMs / tickCount}ms over {tickCount} ticks");
+                    _logger.Information("[stat] avg read={AvgRead}ms over {TickCount} ticks",
+                        totalReadMs / tickCount, tickCount);
 
                 await Task.Delay(TickMs);
             }
@@ -184,7 +194,7 @@ public partial class GameBridge(string serverHost, int serverPort, string name, 
             try { await receiveTask;  } catch { }
             try { await rotStateTask; } catch { }
             try { await pingTask;     } catch { }
-            Console.WriteLine("Removing all ghosts...");
+            _logger.Information("Removing all ghosts...");
             try { await ExecLuaAsync("KCD2MP_RemoveAllGhosts()"); } catch { }
         }
     }
@@ -201,14 +211,8 @@ public partial class GameBridge(string serverHost, int serverPort, string name, 
             {
                 await Task.Delay(2000, ct);
                 long ts = DateTime.UtcNow.Ticks;
-                var tsBytes = new byte[8];
-                BinaryPrimitives.WriteInt64LittleEndian(tsBytes, ts);
                 _pingsSent[ts] = System.Diagnostics.Stopwatch.GetTimestamp();
-                var packet = new byte[3 + 8];
-                packet[0] = 0x04;
-                BinaryPrimitives.WriteUInt16LittleEndian(packet.AsSpan(1), 8);
-                tsBytes.CopyTo(packet, 3);
-                await stream.WriteAsync(packet, ct);
+                await stream.WriteAsync(PacketWriter.Ping(ts), ct);
             }
             catch (OperationCanceledException) { break; }
             catch { break; }
@@ -253,53 +257,38 @@ public partial class GameBridge(string serverHost, int serverPort, string name, 
 
     private async Task ReceiveLoopAsync(NetworkStream stream, CancellationToken ct)
     {
-        var header = new byte[3];
         try
         {
             while (!ct.IsCancellationRequested)
             {
-                await ReadExactAsync(stream, header, ct);
-                int type       = header[0];
-                int payloadLen = BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(1));
-                var payload    = new byte[payloadLen];
-                await ReadExactAsync(stream, payload, ct);
+                var packet = await stream.ReadPacketAsync(ct);
 
-                if (type == 0x05 && payloadLen == 8)
+                switch (packet.Type)
                 {
-                    long ts = BinaryPrimitives.ReadInt64LittleEndian(payload);
-                    if (_pingsSent.TryRemove(ts, out long sentAt))
-                    {
-                        int ms = (int)((System.Diagnostics.Stopwatch.GetTimestamp() - sentAt)
-                                       * 1000L / System.Diagnostics.Stopwatch.Frequency);
-                        Console.WriteLine($"[ping] {ms} ms");
-                        try { await ExecLuaAsync($"KCD2MP_ShowPing({ms})"); } catch { }
-                    }
-                }
-                else if (type == 0x02 && (payloadLen == 17 || payloadLen == 18))
-                {
-                    // Ghost packet v1 (17): [ghostId:1][x:4f][y:4f][z:4f][rotZ:4f]
-                    // Ghost packet v2 (18): [ghostId:1][x:4f][y:4f][z:4f][rotZ:4f][flags:1]
-                    byte ghostId   = payload[0];
-                    float x        = ReadFloat(payload, 1);
-                    float y        = ReadFloat(payload, 5);
-                    float z        = ReadFloat(payload, 9);
-                    float rotZ     = ReadFloat(payload, 13);
-                    bool  isRiding = payloadLen >= 18 && (payload[17] & 0x01) != 0;
-                    await UpdateGhostAsync(ghostId.ToString(), x, y, z, rotZ, isRiding);
-                }
-                else if (type == 0x03 && payloadLen >= 2)
-                {
-                    // Name packet: [ghostId:1][name:UTF-8...]
-                    byte ghostId = payload[0];
-                    string gname = Encoding.UTF8.GetString(payload, 1, payloadLen - 1);
-                    await SetGhostNameAsync(ghostId.ToString(), gname);
-                }
-                else if (type == 0x06 && payloadLen == 1)
-                {
-                    // Disconnect packet: [ghostId:1]
-                    byte ghostId = payload[0];
-                    Console.WriteLine($"[disconnect] ghost {ghostId} removed");
-                    try { await ExecLuaAsync($"KCD2MP_RemoveGhost(\"{ghostId}\")"); } catch { }
+                    case PacketType.Pong when packet.Payload.Length == 8:
+                        long ts = PacketReader.ReadInt64(packet.Payload, 0);
+                        if (_pingsSent.TryRemove(ts, out long sentAt))
+                        {
+                            int ms = (int)((System.Diagnostics.Stopwatch.GetTimestamp() - sentAt)
+                                           * 1000L / System.Diagnostics.Stopwatch.Frequency);
+                            _logger.Information("[ping] {Ms} ms", ms);
+                            try { await ExecLuaAsync($"KCD2MP_ShowPing({ms})"); } catch { }
+                        }
+                        break;
+                    case PacketType.Ghost when packet.Payload.Length is 17 or 18:
+                        var (ghostId, x, y, z, rotZ, flags) = PacketReader.ParseGhost(packet.Payload);
+                        bool isRiding = (flags & 0x01) != 0;
+                        await UpdateGhostAsync(ghostId.ToString(), x, y, z, rotZ, isRiding);
+                        break;
+                    case PacketType.Name when packet.Payload.Length >= 2:
+                        var (nameGhostId, gname) = PacketReader.ParseName(packet.Payload);
+                        await SetGhostNameAsync(nameGhostId.ToString(), gname);
+                        break;
+                    case PacketType.Disconnect when packet.Payload.Length == 1:
+                        byte dcGhostId = packet.Payload[0];
+                        _logger.Information("[disconnect] ghost {GhostId} removed", dcGhostId);
+                        try { await ExecLuaAsync($"KCD2MP_RemoveGhost(\"{dcGhostId}\")"); } catch { }
+                        break;
                 }
             }
         }
@@ -348,7 +337,7 @@ public partial class GameBridge(string serverHost, int serverPort, string name, 
         try
         {
             await ExecLuaAsync($@"KCD2MP_UpdateGhost(""{ghostId}"",{gx},{gy},{gz},{rot},{ride})");
-            Console.WriteLine($"[ghost {ghostId}] {gx} {gy} {gz} riding={isRiding}");
+            _logger.Information("[ghost {GhostId}] {X} {Y} {Z} riding={IsRiding}", ghostId, gx, gy, gz, isRiding);
         }
         catch { /* game might have unloaded */ }
     }
@@ -360,7 +349,7 @@ public partial class GameBridge(string serverHost, int serverPort, string name, 
         try
         {
             await ExecLuaAsync($@"KCD2MP_SetGhostName(""{ghostId}"",""{safeName}"")");
-            Console.WriteLine($"[name] ghost {ghostId} = {ghostName}");
+            _logger.Information("[name] ghost {GhostId} = {GhostName}", ghostId, ghostName);
         }
         catch { }
     }
@@ -377,33 +366,7 @@ public partial class GameBridge(string serverHost, int serverPort, string name, 
 
     private static async Task SendPositionAsync(NetworkStream stream, float x, float y, float z, float rotZ, bool isRiding)
     {
-        // 3 header + 17 payload = 20 bytes
-        var packet = new byte[3 + 17];
-        packet[0] = 0x01;
-        BinaryPrimitives.WriteUInt16LittleEndian(packet.AsSpan(1), 17);
-        WriteFloat(packet, 3,  x);
-        WriteFloat(packet, 7,  y);
-        WriteFloat(packet, 11, z);
-        WriteFloat(packet, 15, rotZ);
-        packet[19] = isRiding ? (byte)0x01 : (byte)0x00;
-        await stream.WriteAsync(packet);
-    }
-
-    private static float ReadFloat(byte[] buf, int offset) =>
-        BitConverter.Int32BitsToSingle(BinaryPrimitives.ReadInt32LittleEndian(buf.AsSpan(offset)));
-
-    private static void WriteFloat(byte[] buf, int offset, float value) =>
-        BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(offset), BitConverter.SingleToInt32Bits(value));
-
-    private static async Task ReadExactAsync(NetworkStream stream, byte[] buffer, CancellationToken ct = default)
-    {
-        int offset = 0;
-        while (offset < buffer.Length)
-        {
-            int n = await stream.ReadAsync(buffer, offset, buffer.Length - offset, ct);
-            if (n == 0) throw new EndOfStreamException();
-            offset += n;
-        }
+        await stream.WriteAsync(PacketWriter.Position(x, y, z, rotZ, isRiding));
     }
 
     private bool HasChanged(float x, float y, float z, float rotZ) =>

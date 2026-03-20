@@ -1,3 +1,21 @@
 mods - Shortcut.lnk
 memory.md
-.claude
+
+# Build outputs
+dotnet/publish/
+dotnet/**/bin/
+dotnet/**/obj/
+
+# IDE
+.vs/
+.idea/
+*.user
+*.suo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project
+.superpowers/
+.claude.superpowers/

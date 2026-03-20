@@ -1,38 +1,48 @@
 using System.Net;
 using System.Net.Sockets;
+using Serilog;
 
 namespace KcdMp.Server;
 
-public class RelayServer(int port, bool echo = false)
+public class RelayServer(int port, bool echo = false, string password = "", ILogger? logger = null)
 {
     private readonly List<ClientSession> _clients = [];
     private readonly object _lock = new();
+    private readonly ILogger _logger = logger ?? Log.Logger;
     public bool Echo { get; } = echo;
+    public string Password { get; } = password;
 
-    public async Task RunAsync()
+    public async Task RunAsync(CancellationToken ct = default)
     {
         var listener = new TcpListener(IPAddress.Any, port);
         listener.Start();
-        Console.WriteLine($"Listening on port {port}...");
-        Console.WriteLine("Waiting for clients to connect.");
-        Console.WriteLine();
+        _logger.Information("Listening on port {Port}...", port);
+        _logger.Information("Waiting for clients to connect.");
 
-        while (true)
+        try
         {
-            var tcp = await listener.AcceptTcpClientAsync();
-            var session = new ClientSession(tcp, this);
-
-            lock (_lock)
-                _clients.Add(session);
-
-            _ = session.RunAsync().ContinueWith(_ =>
+            while (true)
             {
+                var tcp = await listener.AcceptTcpClientAsync(ct);
+                var session = new ClientSession(tcp, this, _logger);
+
                 lock (_lock)
-                    _clients.Remove(session);
-                Console.WriteLine($"[-] {session.Name ?? $"id={session.Id}"} disconnected. Clients: {_clients.Count}");
-                if (session.IsReady)
-                    BroadcastDisconnect(session);
-            });
+                    _clients.Add(session);
+
+                _ = session.RunAsync().ContinueWith(_ =>
+                {
+                    lock (_lock)
+                        _clients.Remove(session);
+                    _logger.Information("[-] {Client} disconnected. Clients: {ClientCount}",
+                        session.Name ?? $"id={session.Id}", _clients.Count);
+                    if (session.IsReady)
+                        BroadcastDisconnect(session);
+                });
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            listener.Stop();
         }
     }
 
