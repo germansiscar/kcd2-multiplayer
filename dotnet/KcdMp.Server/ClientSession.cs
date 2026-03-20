@@ -45,6 +45,25 @@ public class ClientSession
         var writeTask = WriteLoopAsync();
         try
         {
+            // --- Auth (if server has password) ---
+            if (!string.IsNullOrEmpty(_server.Password))
+            {
+                var authPacket = await _stream.ReadPacketAsync();
+                if (authPacket.Type != PacketType.Auth)
+                {
+                    EnqueueRaw(PacketWriter.AuthResult(false, "Expected Auth packet"));
+                    return;
+                }
+                string clientPassword = PacketReader.ReadUtf8(authPacket.Payload, 0, authPacket.Payload.Length);
+                if (clientPassword != _server.Password)
+                {
+                    EnqueueRaw(PacketWriter.AuthResult(false, "Wrong password"));
+                    await Task.Delay(100); // let packet flush before closing
+                    return;
+                }
+                EnqueueRaw(PacketWriter.AuthResult(true, "OK"));
+            }
+
             // --- Handshake ---
             var hsPacket = await _stream.ReadPacketAsync();
             if (hsPacket.Type != PacketType.Handshake)

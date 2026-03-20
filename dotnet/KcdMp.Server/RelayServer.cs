@@ -3,13 +3,14 @@ using System.Net.Sockets;
 
 namespace KcdMp.Server;
 
-public class RelayServer(int port, bool echo = false)
+public class RelayServer(int port, bool echo = false, string password = "")
 {
     private readonly List<ClientSession> _clients = [];
     private readonly object _lock = new();
     public bool Echo { get; } = echo;
+    public string Password { get; } = password;
 
-    public async Task RunAsync()
+    public async Task RunAsync(CancellationToken ct = default)
     {
         var listener = new TcpListener(IPAddress.Any, port);
         listener.Start();
@@ -17,22 +18,29 @@ public class RelayServer(int port, bool echo = false)
         Console.WriteLine("Waiting for clients to connect.");
         Console.WriteLine();
 
-        while (true)
+        try
         {
-            var tcp = await listener.AcceptTcpClientAsync();
-            var session = new ClientSession(tcp, this);
-
-            lock (_lock)
-                _clients.Add(session);
-
-            _ = session.RunAsync().ContinueWith(_ =>
+            while (true)
             {
+                var tcp = await listener.AcceptTcpClientAsync(ct);
+                var session = new ClientSession(tcp, this);
+
                 lock (_lock)
-                    _clients.Remove(session);
-                Console.WriteLine($"[-] {session.Name ?? $"id={session.Id}"} disconnected. Clients: {_clients.Count}");
-                if (session.IsReady)
-                    BroadcastDisconnect(session);
-            });
+                    _clients.Add(session);
+
+                _ = session.RunAsync().ContinueWith(_ =>
+                {
+                    lock (_lock)
+                        _clients.Remove(session);
+                    Console.WriteLine($"[-] {session.Name ?? $"id={session.Id}"} disconnected. Clients: {_clients.Count}");
+                    if (session.IsReady)
+                        BroadcastDisconnect(session);
+                });
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            listener.Stop();
         }
     }
 
