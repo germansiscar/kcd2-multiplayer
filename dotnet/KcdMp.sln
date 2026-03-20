@@ -1,4 +1,4 @@
-
+﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.0.31903.59
@@ -6,6 +6,8 @@ MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "KcdMp.Server", "KcdMp.Server\KcdMp.Server.csproj", "{3E7F8A92-B1D4-4C6E-9F25-1A3B7E8D9C4F}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "KcdMp.Client", "KcdMp.Client\KcdMp.Client.csproj", "{8D2C1A5F-E3B7-4D90-A8C6-2F9E5B4A7D1C}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "KcdMp.Shared", "KcdMp.Shared\KcdMp.Shared.csproj", "{103BC758-F7BE-45D1-A098-52C3EF6C8446}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -21,5 +23,9 @@ Global
 		{8D2C1A5F-E3B7-4D90-A8C6-2F9E5B4A7D1C}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{8D2C1A5F-E3B7-4D90-A8C6-2F9E5B4A7D1C}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{8D2C1A5F-E3B7-4D90-A8C6-2F9E5B4A7D1C}.Release|Any CPU.Build.0 = Release|Any CPU
+		{103BC758-F7BE-45D1-A098-52C3EF6C8446}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{103BC758-F7BE-45D1-A098-52C3EF6C8446}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{103BC758-F7BE-45D1-A098-52C3EF6C8446}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{103BC758-F7BE-45D1-A098-52C3EF6C8446}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal
