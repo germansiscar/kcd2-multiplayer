@@ -9,6 +9,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "KcdMp.Client", "KcdMp.Clien
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "KcdMp.Shared", "KcdMp.Shared\KcdMp.Shared.csproj", "{103BC758-F7BE-45D1-A098-52C3EF6C8446}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "KcdMp.Tests", "KcdMp.Tests\KcdMp.Tests.csproj", "{E7DA5442-18AD-4CF3-82FB-8C4832E99943}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "KcdMp.App", "KcdMp.App\KcdMp.App.csproj", "{81FB63C6-D766-4C08-8ED1-0CA48FDA601A}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -27,5 +31,13 @@ Global
 		{103BC758-F7BE-45D1-A098-52C3EF6C8446}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{103BC758-F7BE-45D1-A098-52C3EF6C8446}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{103BC758-F7BE-45D1-A098-52C3EF6C8446}.Release|Any CPU.Build.0 = Release|Any CPU
+		{E7DA5442-18AD-4CF3-82FB-8C4832E99943}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{E7DA5442-18AD-4CF3-82FB-8C4832E99943}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{E7DA5442-18AD-4CF3-82FB-8C4832E99943}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{E7DA5442-18AD-4CF3-82FB-8C4832E99943}.Release|Any CPU.Build.0 = Release|Any CPU
+		{81FB63C6-D766-4C08-8ED1-0CA48FDA601A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{81FB63C6-D766-4C08-8ED1-0CA48FDA601A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{81FB63C6-D766-4C08-8ED1-0CA48FDA601A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{81FB63C6-D766-4C08-8ED1-0CA48FDA601A}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal

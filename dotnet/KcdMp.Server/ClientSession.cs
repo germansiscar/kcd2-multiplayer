@@ -1,5 +1,6 @@
 using System.Net.Sockets;
 using System.Threading.Channels;
+using Serilog;
 using KcdMp.Shared.Protocol;
 
 namespace KcdMp.Server;
@@ -28,16 +29,18 @@ public class ClientSession
     private readonly NetworkStream _stream;
     private readonly RelayServer _server;
     private readonly Channel<byte[]> _writeQueue = Channel.CreateUnbounded<byte[]>();
+    private readonly ILogger _logger;
 
     public byte Id { get; } = (byte)Interlocked.Increment(ref _idCounter);
     public string? Name { get; private set; }
     public bool IsReady => Name is not null;
 
-    public ClientSession(TcpClient tcp, RelayServer server)
+    public ClientSession(TcpClient tcp, RelayServer server, ILogger? logger = null)
     {
         _tcp = tcp;
         _stream = tcp.GetStream();
         _server = server;
+        _logger = logger ?? Log.Logger;
     }
 
     public async Task RunAsync()
@@ -68,12 +71,13 @@ public class ClientSession
             var hsPacket = await _stream.ReadPacketAsync();
             if (hsPacket.Type != PacketType.Handshake)
             {
-                Console.WriteLine($"[!] Client sent bad handshake type 0x{(byte)hsPacket.Type:X2}, dropping.");
+                _logger.Warning("[!] Client sent bad handshake type 0x{PacketType:X2}, dropping.", (byte)hsPacket.Type);
                 return;
             }
             Name = PacketReader.ReadUtf8(hsPacket.Payload, 0, hsPacket.Payload.Length);
 
-            Console.WriteLine($"[+] '{Name}' connected (id={Id}) from {_tcp.Client.RemoteEndPoint}. Clients: active");
+            _logger.Information("[+] '{Name}' connected (id={Id}) from {RemoteEndPoint}. Clients: active",
+                Name, Id, _tcp.Client.RemoteEndPoint);
 
             // Send Ack with assigned ID
             EnqueueRaw(PacketWriter.Ack(Id));
