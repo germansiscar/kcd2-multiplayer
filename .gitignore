@@ -19,3 +19,8 @@ Thumbs.db
 # Project
 .superpowers/
 .claude.superpowers/
+
+# Probe artifacts (game data, not for repo)
+probes/phase2/*.pak
+probes/phase2/scripts_extracted/
+probes/phase2/tables_extracted/

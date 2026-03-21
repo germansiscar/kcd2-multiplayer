@@ -45,4 +45,34 @@ public static class PacketReader
 
     public static (bool ok, string message) ParseAuthResult(byte[] payload)
         => (payload[0] != 0, payload.Length > 1 ? ReadUtf8(payload, 1, payload.Length - 1) : "");
+
+    public static (byte stateType, byte[] payload) ParseStateUpdate(byte[] payload)
+    {
+        var data = new byte[payload.Length - 1];
+        Buffer.BlockCopy(payload, 1, data, 0, data.Length);
+        return (payload[0], data);
+    }
+
+    public static (byte sourceId, byte stateType, byte[] payload) ParseStateSync(byte[] payload)
+    {
+        var data = new byte[payload.Length - 2];
+        Buffer.BlockCopy(payload, 2, data, 0, data.Length);
+        return (payload[0], payload[1], data);
+    }
+
+    public static (ushort eventType, byte[] jsonPayload) ParseEvent(byte[] payload)
+    {
+        var eventType = ReadUInt16(payload, 0);
+        var json = new byte[payload.Length - 2];
+        Buffer.BlockCopy(payload, 2, json, 0, json.Length);
+        return (eventType, json);
+    }
+
+    public static (byte sourceId, ushort eventType, byte[] jsonPayload) ParseEventRelay(byte[] payload)
+    {
+        var eventType = ReadUInt16(payload, 1);
+        var json = new byte[payload.Length - 3];
+        Buffer.BlockCopy(payload, 3, json, 0, json.Length);
+        return (payload[0], eventType, json);
+    }
 }

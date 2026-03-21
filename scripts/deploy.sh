@@ -5,7 +5,7 @@ set -euo pipefail
 export PATH="$HOME/.dotnet:$PATH"
 
 REMOTE="${1:-}"
-REMOTE_DIR="${2:-C:/kcdmp}"
+REMOTE_DIR="${2:-C:/Users/MikeY/Documents/kcdmp}"
 
 if [ -z "$REMOTE" ]; then
     echo "Usage: deploy.sh user@windowspc [remote_dir]"
@@ -22,11 +22,14 @@ dotnet publish KcdMp.App -c Release -r win-x64 --self-contained \
 
 echo ""
 echo "=== Deploying to $REMOTE:$REMOTE_DIR ==="
-ssh "$REMOTE" "mkdir -p '$REMOTE_DIR'" 2>/dev/null || true
+ssh "$REMOTE" "if not exist \"$REMOTE_DIR\" mkdir \"$REMOTE_DIR\"" 2>/dev/null || true
 scp publish/app/kcdmp.exe "$REMOTE:$REMOTE_DIR/"
 
 echo "=== Deploying mod files ==="
 scp -r ../kdcmp "$REMOTE:$REMOTE_DIR/"
+
+echo "=== Deploying setup script ==="
+scp ../setup.ps1 "$REMOTE:$REMOTE_DIR/"
 
 echo ""
 echo "=== Deploy complete ==="

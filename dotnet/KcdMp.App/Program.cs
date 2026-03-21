@@ -25,9 +25,9 @@ Log.Information("=== KCD2 Multiplayer ===");
 Log.Information("Mode    : {Mode}", config.Mode);
 Log.Information("Name    : {Name}", name);
 
-using var cts = new CancellationTokenSource();
-Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
-AppDomain.CurrentDomain.ProcessExit += (_, _) => { cts.Cancel(); Thread.Sleep(500); };
+var cts = new CancellationTokenSource();
+Console.CancelKeyPress += (_, e) => { e.Cancel = true; try { cts.Cancel(); } catch (ObjectDisposedException) { } };
+AppDomain.CurrentDomain.ProcessExit += (_, _) => { try { cts.Cancel(); } catch (ObjectDisposedException) { } };
 
 if (config.Mode == "host")
 {
