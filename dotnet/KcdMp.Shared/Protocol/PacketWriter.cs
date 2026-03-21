@@ -77,6 +77,40 @@ public static class PacketWriter
         return Build(PacketType.AuthResult, payload);
     }
 
+    public static byte[] StateUpdate(byte stateType, byte[] payload)
+    {
+        var buf = new byte[1 + payload.Length];
+        buf[0] = stateType;
+        Buffer.BlockCopy(payload, 0, buf, 1, payload.Length);
+        return Build(PacketType.StateUpdate, buf);
+    }
+
+    public static byte[] StateSync(byte sourceId, byte stateType, byte[] payload)
+    {
+        var buf = new byte[2 + payload.Length];
+        buf[0] = sourceId;
+        buf[1] = stateType;
+        Buffer.BlockCopy(payload, 0, buf, 2, payload.Length);
+        return Build(PacketType.StateSync, buf);
+    }
+
+    public static byte[] Event(ushort eventType, byte[] jsonPayload)
+    {
+        var buf = new byte[2 + jsonPayload.Length];
+        BinaryPrimitives.WriteUInt16LittleEndian(buf.AsSpan(0, 2), eventType);
+        Buffer.BlockCopy(jsonPayload, 0, buf, 2, jsonPayload.Length);
+        return Build(PacketType.Event, buf);
+    }
+
+    public static byte[] EventRelay(byte sourceId, ushort eventType, byte[] jsonPayload)
+    {
+        var buf = new byte[3 + jsonPayload.Length];
+        buf[0] = sourceId;
+        BinaryPrimitives.WriteUInt16LittleEndian(buf.AsSpan(1, 2), eventType);
+        Buffer.BlockCopy(jsonPayload, 0, buf, 3, jsonPayload.Length);
+        return Build(PacketType.EventRelay, buf);
+    }
+
     public static void WriteFloat(byte[] buf, int offset, float value)
         => BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(offset), BitConverter.SingleToInt32Bits(value));
 }

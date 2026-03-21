@@ -14,6 +14,8 @@ KCD2MP.workingClass = "AnimObject"
 KCD2MP.playerSneaking = false   -- set by OnAction hook when sneak key pressed
 KCD2MP.isRiding = false         -- updated each interp tick (player on horse detection)
 KCD2MP.logActions = false       -- set true only to discover action names (floods log)
+KCD2MP.pendingDamageEvents = {}
+KCD2MP.ghostEntityIds = {}  -- maps entity ID -> ghost player ID
 
 -- ===== Debug Logger =====
 -- Messages are queued in KCD2MP.debugLog (max 50).
@@ -188,6 +190,10 @@ function KCD2MP_SpawnGhost(id, x, y, z, rotZ)
         entityId = entity.id,
         istate = istate,
     }
+
+    if entity and entity.id then
+        KCD2MP.ghostEntityIds[entity.id] = id
+    end
 
     -- Schedule name apply after entity fully inits (soul may not be ready at spawn time).
     -- Uses Steam nick if already received via 0x03, else fallback "Player<id>".
@@ -1056,6 +1062,9 @@ end
 function KCD2MP_RemoveGhost(id)
     local ghost = KCD2MP.ghosts[id]
     if not ghost then return end
+    if ghost.entity and ghost.entity.id then
+        KCD2MP.ghostEntityIds[ghost.entity.id] = nil
+    end
     -- Remove horse ghost first (if riding)
     KCD2MP_RemoveHorse(id)
     if ghost.entityId then
@@ -2305,6 +2314,62 @@ local function handleAction(action, activation, value)
     end
 end
 
+-- ===== Combat State Application =====
+-- Called from C# when partner's combat state changes
+function KCD2MP_ApplyCombatState(ghostId, flags, animName)
+    pcall(function()
+        local ghost = KCD2MP.ghosts[ghostId]
+        if not ghost or not ghost.entity then return end
+
+        local weaponDrawn = (flags % 2) >= 1         -- bit 0
+        local inDanger    = (math.floor(flags/2) % 2) >= 1  -- bit 1
+        local sneaking    = (math.floor(flags/4) % 2) >= 1  -- bit 2
+
+        -- Apply weapon drawn/holstered
+        if ghost.entity.actor and ghost.entity.actor.HolsterItem then
+            pcall(function() ghost.entity.actor:HolsterItem(not weaponDrawn) end)
+        end
+
+        -- Apply animation if provided and different from current
+        if animName and animName ~= "" and ghost.istate then
+            if ghost.istate.lastAnim ~= animName then
+                ghost.istate.lastAnim = animName
+                pcall(function() ghost.entity:StartAnimation(0, animName) end)
+            end
+        end
+    end)
+end
+
+-- Called from C# when partner's equipment changes
+function KCD2MP_ApplyEquipment(ghostId, jsonStr)
+    pcall(function()
+        local ghost = KCD2MP.ghosts[ghostId]
+        if not ghost or not ghost.entity then return end
+
+        -- Simple JSON parsing for {"clothing":"guid","weapon":"guid"}
+        local clothing = jsonStr:match('"clothing"%s*:%s*"([^"]+)"')
+        local weapon = jsonStr:match('"weapon"%s*:%s*"([^"]+)"')
+
+        if clothing and ghost.entity.actor and ghost.entity.actor.EquipClothingPreset then
+            pcall(function() ghost.entity.actor:EquipClothingPreset(clothing) end)
+        end
+        if weapon and ghost.entity.actor and ghost.entity.actor.EquipWeaponPreset then
+            pcall(function() ghost.entity.actor:EquipWeaponPreset(weapon) end)
+        end
+    end)
+end
+
+-- ===== NPC Damage Handler =====
+-- Called from C# when partner damages an NPC in their game
+function KCD2MP_HandleNpcDamage(entityName, amount)
+    pcall(function()
+        local entity = System.GetEntityByName(entityName)
+        if entity and entity.soul then
+            entity.soul:DealDamage(amount, 0, __null, true)
+        end
+    end)
+end
+
 -- ===== Player hook =====
 
 local ok2, err2 = pcall(function()
@@ -2348,5 +2413,47 @@ if not ok2 then
     System.LogAlways("[KCD2-MP] Hook error: " .. tostring(err2))
 end
 
+-- ===== OnHit Hook =====
+-- Hook hit system for damage detection (friendly fire + shared NPC combat)
+local ok3, err3 = pcall(function()
+    if not (SinglePlayer and SinglePlayer.Client) then
+        System.LogAlways("[KCD2-MP] SinglePlayer.Client not available, OnHit hook skipped")
+        return
+    end
+
+    local origSPOnHit = SinglePlayer.Client.OnHit
+    SinglePlayer.Client.OnHit = function(self, hit)
+        pcall(function()
+            if not hit or not player then return end
+            local isGhostTarget = KCD2MP.ghostEntityIds[hit.targetId]
+            local isPlayerShooter = (hit.shooterId == player.id)
+
+            if isGhostTarget and isPlayerShooter then
+                -- Player hitting partner's ghost -> friendly fire
+                KCD2MP.pendingDamageEvents[#KCD2MP.pendingDamageEvents + 1] = {
+                    type = "friendly_fire",
+                    entityName = "",
+                    damage = hit.damage or 0,
+                }
+            elseif isPlayerShooter and not isGhostTarget then
+                -- Player hitting an NPC -> shared combat
+                local target = System.GetEntity(hit.targetId)
+                if target and target.GetName then
+                    KCD2MP.pendingDamageEvents[#KCD2MP.pendingDamageEvents + 1] = {
+                        type = "npc_damage",
+                        entityName = target:GetName() or "",
+                        damage = hit.damage or 0,
+                    }
+                end
+            end
+        end)
+
+        if origSPOnHit then pcall(origSPOnHit, self, hit) end
+    end
+    System.LogAlways("[KCD2-MP] OnHit hook installed")
+end)
+if not ok3 then
+    System.LogAlways("[KCD2-MP] OnHit hook error: " .. tostring(err3))
+end
 
 

@@ -20,9 +20,10 @@ namespace KcdMp.Client;
 ///
 /// Smoothness optimisation:
 ///   - Position read = 1 HTTP call (GET PlayerSoul) per TickMs.
-///   - Rotation + riding state are read in a SEPARATE background loop every
+///   - Rotation + riding + combat state are read in a SEPARATE background loop every
 ///     RotStateIntervalMs (80 ms). Cached values are used by the position loop.
 ///     This cuts per-tick latency from ~50 ms to ~15 ms.
+///   - Combat state changes trigger StateUpdate packets on the background loop.
 /// </summary>
 public partial class GameBridge(string serverHost, int serverPort, string password, string name, string gameApiBase, Serilog.ILogger? logger = null)
 {
@@ -41,6 +42,16 @@ public partial class GameBridge(string serverHost, int serverPort, string passwo
     // Cached rotation + riding state updated by background loop (volatile = visible across threads)
     private volatile float _cachedRotZ = 0f;
     private volatile bool  _cachedIsRiding = false;
+
+    // Last sent combat state (for delta detection)
+    private volatile byte _lastCombatFlags = 0;
+    private volatile string _lastAnimName = "";
+
+    private const int DamageCheckMs = 100;
+    private volatile bool _isDead = false;
+
+    // Serializes access to sv_servername CVar (both StateLoop and DamageEventLoop use it)
+    private readonly SemaphoreSlim _cvarLock = new(1, 1);
 
     // Ping: maps sent timestamp (ticks) → Stopwatch timestamp at send time
     private readonly System.Collections.Concurrent.ConcurrentDictionary<long, long> _pingsSent = new();
@@ -100,6 +111,7 @@ public partial class GameBridge(string serverHost, int serverPort, string passwo
     private async Task ConnectAndRunAsync(CancellationToken appCt = default)
     {
         using var tcp = new TcpClient();
+        _isDead = false;
 
         _logger.Information("Connecting to relay server {ServerHost}:{ServerPort}...", serverHost, serverPort);
         try
@@ -147,8 +159,9 @@ public partial class GameBridge(string serverHost, int serverPort, string passwo
 
         // Start background tasks
         var receiveTask  = ReceiveLoopAsync(stream, cts.Token);
-        var rotStateTask = RotStateLoopAsync(cts.Token);
+        var stateTask    = StateLoopAsync(stream, cts.Token);
         var pingTask     = PingLoopAsync(stream, cts.Token);
+        var damageTask   = DamageEventLoopAsync(stream, cts.Token);
 
         // --- Position push loop ---
         try
@@ -192,15 +205,16 @@ public partial class GameBridge(string serverHost, int serverPort, string passwo
         {
             cts.Cancel();
             try { await receiveTask;  } catch { }
-            try { await rotStateTask; } catch { }
+            try { await stateTask; } catch { }
             try { await pingTask;     } catch { }
+            try { await damageTask;   } catch { }
             _logger.Information("Removing all ghosts...");
             try { await ExecLuaAsync("KCD2MP_RemoveAllGhosts()"); } catch { }
         }
     }
 
     // -------------------------------------------------------------------------
-    // Background rotation + riding state loop (every RotStateIntervalMs)
+    // Background state loop (rotation + riding + combat state every 80ms)
     // -------------------------------------------------------------------------
 
     private async Task PingLoopAsync(NetworkStream stream, CancellationToken ct)
@@ -219,37 +233,171 @@ public partial class GameBridge(string serverHost, int serverPort, string passwo
         }
     }
 
-    private async Task RotStateLoopAsync(CancellationToken ct)
+    private async Task StateLoopAsync(NetworkStream stream, CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
             try
             {
-                // Riding state is detected in the Lua interp tick (where Terrain API is
-                // available) and cached in KCD2MP.isRiding. We just read that here.
-                // Note: Terrain.GetElevation is NOT available in ExecuteString context.
-                await ExecLuaAsync(
-                    @"System.SetCVar(""sv_servername"",(function()" +
-                    @"local r=player:GetWorldAngles().z;" +
-                    @"local ride=KCD2MP and KCD2MP.isRiding and 'r' or 's';" +
-                    @"return string.format('%.4f,%s',r,ride)end)())");
-
-                var xml = await _http.GetStringAsync($"{gameApiBase}/api/System/Console/GetCvarValue?name=sv_servername");
-                var m = CvarValueRegex().Match(xml);
-                if (m.Success)
+                // Serialize CVar access (DamageEventLoop also uses sv_servername)
+                await _cvarLock.WaitAsync(ct);
+                try
                 {
-                    var parts = m.Groups[1].Value.Split(',');
-                    if (parts.Length >= 1 && float.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out float rot))
-                        _cachedRotZ = rot;
-                    if (parts.Length >= 2)
-                        _cachedIsRiding = parts[1].Trim() == "r";
-                }
-            }
-            catch { /* game might be loading, just use cached values */ }
+                    // Combined CVar read: rotation, riding, combat flags, animation
+                    await ExecLuaAsync(
+                        @"System.SetCVar(""sv_servername"",(function()" +
+                        @"local r=player:GetWorldAngles().z;" +
+                        @"local ride=KCD2MP and KCD2MP.isRiding and 'r' or 's';" +
+                        @"local cm=player.soul:IsInCombatMode() and 1 or 0;" +
+                        @"local cd=player.soul:IsInCombatDanger() and 1 or 0;" +
+                        @"local sn=KCD2MP and KCD2MP.playerSneaking and 1 or 0;" +
+                        @"local anim='';" +
+                        @"pcall(function() anim=tostring(player.actor:GetCurrentAnimationState(0) or '') end);" +
+                        @"return string.format('%.4f,%s,%d,%d,%d,%s',r,ride,cm,cd,sn,anim)end)())");
 
-            await Task.Delay(RotStateIntervalMs, ct);
+                    var xml = await _http.GetStringAsync(
+                        $"{gameApiBase}/api/System/Console/GetCvarValue?name=sv_servername");
+                    var m = CvarValueRegex().Match(xml);
+                    if (m.Success)
+                    {
+                        var parts = m.Groups[1].Value.Split(',', 6);
+                        if (parts.Length >= 5)
+                        {
+                            // Rotation + riding
+                            if (float.TryParse(parts[0], NumberStyles.Float,
+                                    CultureInfo.InvariantCulture, out float rot))
+                                _cachedRotZ = rot;
+                            _cachedIsRiding = parts[1].Trim() == "r";
+
+                            // Combat state flags
+                            byte flags = 0;
+                            if (parts[2] == "1") flags |= 0x01; // weapon drawn
+                            if (parts[3] == "1") flags |= 0x02; // combat danger
+                            if (parts[4] == "1") flags |= 0x04; // sneaking
+                            if (_cachedIsRiding) flags |= 0x10;  // riding
+
+                            string animName = parts.Length >= 6 ? parts[5] : "";
+
+                            // Only send StateUpdate when combat state changes
+                            if (flags != _lastCombatFlags || animName != _lastAnimName)
+                            {
+                                _lastCombatFlags = flags;
+                                _lastAnimName = animName;
+
+                                var animBytes = System.Text.Encoding.UTF8.GetBytes(animName);
+                                if (animBytes.Length > 255) animBytes = animBytes[..255];
+                                var payload = new byte[1 + 1 + animBytes.Length];
+                                payload[0] = flags;
+                                payload[1] = (byte)animBytes.Length;
+                                Buffer.BlockCopy(animBytes, 0, payload, 2, animBytes.Length);
+
+                                var packet = PacketWriter.StateUpdate(
+                                    (byte)StateType.CombatState, payload);
+                                await stream.WriteAsync(packet, ct);
+
+                                _logger.Debug("[state] flags={Flags:X2} anim={Anim}",
+                                    flags, animName);
+                            }
+                        }
+                    }
+                }
+                finally { _cvarLock.Release(); }
+            }
+            catch (OperationCanceledException) { break; }
+            catch (Exception ex) { _logger.Warning(ex, "[state] Read error"); }
+
+            await Task.Delay(RotStateIntervalMs, ct); // reuse existing 80ms interval
         }
     }
+
+    private async Task DamageEventLoopAsync(NetworkStream stream, CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                // Serialize CVar access (StateLoop also uses sv_servername)
+                await _cvarLock.WaitAsync(ct);
+                try
+                {
+                    // Read + clear pending damage events from Lua
+                    await ExecLuaAsync(
+                        @"System.SetCVar(""sv_servername"",(function()" +
+                        @"if not KCD2MP or not KCD2MP.pendingDamageEvents then return 'none' end;" +
+                        @"local events=KCD2MP.pendingDamageEvents;" +
+                        @"KCD2MP.pendingDamageEvents={};" +
+                        @"if #events==0 then return 'none' end;" +
+                        @"local parts={};" +
+                        @"for i,e in ipairs(events) do " +
+                        @"parts[#parts+1]=string.format('%s:%s:%s',e.type or '',e.entityName or '',e.damage or 0) end;" +
+                        @"return table.concat(parts,'|')end)())");
+
+                    var xml = await _http.GetStringAsync(
+                        $"{gameApiBase}/api/System/Console/GetCvarValue?name=sv_servername");
+                    var m = CvarValueRegex().Match(xml);
+                    if (m.Success && m.Groups[1].Value != "none")
+                    {
+                        var events = m.Groups[1].Value.Split('|');
+                        foreach (var evt in events)
+                        {
+                            var parts = evt.Split(':', 3);
+                            if (parts.Length < 3) continue;
+
+                            var type = parts[0];
+                            var entityName = parts[1];
+                            var damage = parts[2];
+
+                            if (!int.TryParse(damage, out var dmgValue)) continue;
+
+                            if (type == "friendly_fire")
+                            {
+                                var json = System.Text.Encoding.UTF8.GetBytes(
+                                    $"{{\"amount\":{dmgValue}}}");
+                                await stream.WriteAsync(
+                                    PacketWriter.Event((ushort)EventType.DamageDealt, json), ct);
+                                _logger.Information("[event] Friendly fire: {Damage} damage", dmgValue);
+                            }
+                            else if (type == "npc_damage" && !string.IsNullOrEmpty(entityName))
+                            {
+                                var json = System.Text.Encoding.UTF8.GetBytes(
+                                    $"{{\"entity\":\"{EscapeJson(entityName)}\",\"amount\":{dmgValue}}}");
+                                await stream.WriteAsync(
+                                    PacketWriter.Event((ushort)EventType.NpcDamage, json), ct);
+                                _logger.Information("[event] NPC damage: {Entity} took {Damage}",
+                                    entityName, dmgValue);
+                            }
+                        }
+                    }
+                }
+                finally { _cvarLock.Release(); }
+
+                // Death check uses PlayerSoul endpoint, not sv_servername — no CVar conflict
+                if (!_isDead)
+                {
+                    var healthXml = await _http.GetStringAsync(
+                        $"{gameApiBase}/api/rpg/SoulList/PlayerSoul?depth=1");
+                    if (healthXml.Contains("Health=\"0\"") || healthXml.Contains("IsDead=\"true\""))
+                    {
+                        _isDead = true;
+                        var json = "{}"u8.ToArray();
+                        await stream.WriteAsync(
+                            PacketWriter.Event((ushort)EventType.PlayerDied, json), ct);
+                        _logger.Warning("[event] Player died — notifying partner");
+                    }
+                }
+            }
+            catch (OperationCanceledException) { break; }
+            catch (Exception ex) { _logger.Warning(ex, "[event] Poll error"); }
+
+            await Task.Delay(DamageCheckMs, ct);
+        }
+    }
+
+    private static string EscapeJson(string s) =>
+        s.Replace("\\", "\\\\").Replace("\"", "\\\"");
+
+    private static string EscapeLua(string s) =>
+        s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "").Replace("\0", "");
 
     // -------------------------------------------------------------------------
     // Receive loop – server pushes Ghost and Name packets to us
@@ -289,11 +437,119 @@ public partial class GameBridge(string serverHost, int serverPort, string passwo
                         _logger.Information("[disconnect] ghost {GhostId} removed", dcGhostId);
                         try { await ExecLuaAsync($"KCD2MP_RemoveGhost(\"{dcGhostId}\")"); } catch { }
                         break;
+
+                    case PacketType.StateSync when packet.Payload.Length >= 2:
+                    {
+                        var (srcId, stateType, statePayload) = PacketReader.ParseStateSync(packet.Payload);
+                        await HandleStateSyncAsync(srcId, stateType, statePayload);
+                        break;
+                    }
+
+                    case PacketType.EventRelay when packet.Payload.Length >= 3:
+                    {
+                        var (srcId, eventType, jsonPayload) = PacketReader.ParseEventRelay(packet.Payload);
+                        await HandleEventRelayAsync(srcId, eventType, jsonPayload);
+                        break;
+                    }
                 }
             }
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) when (ex is IOException or SocketException or EndOfStreamException) { }
+    }
+
+    private async Task HandleStateSyncAsync(byte sourceId, byte stateType, byte[] payload)
+    {
+        try
+        {
+            if (stateType == (byte)StateType.CombatState && payload.Length >= 2)
+            {
+                byte flags = payload[0];
+                int animLen = payload[1];
+                string animName = animLen > 0 && payload.Length >= 2 + animLen
+                    ? System.Text.Encoding.UTF8.GetString(payload, 2, animLen)
+                    : "";
+
+                var safeAnim = EscapeLua(animName);
+                var lua = $"KCD2MP_ApplyCombatState(\"{sourceId}\",{flags},\"{safeAnim}\")";
+                await ExecLuaAsync(lua);
+                _logger.Debug("[state-in] src={Src} flags={Flags:X2} anim={Anim}",
+                    sourceId, flags, animName);
+            }
+            else if (stateType == (byte)StateType.Equipment)
+            {
+                var json = System.Text.Encoding.UTF8.GetString(payload);
+                var safeJson = EscapeLua(json);
+                var lua = $"KCD2MP_ApplyEquipment(\"{sourceId}\",\"{safeJson}\")";
+                await ExecLuaAsync(lua);
+                _logger.Debug("[state-in] src={Src} equipment={Json}", sourceId, json);
+            }
+        }
+        catch (Exception ex) { _logger.Warning(ex, "[state-in] Error applying state"); }
+    }
+
+    private async Task HandleEventRelayAsync(byte sourceId, ushort eventType, byte[] jsonPayload)
+    {
+        var json = System.Text.Encoding.UTF8.GetString(jsonPayload);
+        _logger.Information("[event-in] src={Src} type={Type} json={Json}",
+            sourceId, (EventType)eventType, json);
+
+        try
+        {
+            switch ((EventType)eventType)
+            {
+                case EventType.DamageDealt:
+                {
+                    var match = Regex.Match(json, @"""amount""\s*:\s*(\d+)");
+                    if (match.Success && int.TryParse(match.Groups[1].Value, out var amount))
+                    {
+                        await ExecLuaAsync(
+                            $"player.soul:DealDamage({amount},0,__null,true);" +
+                            $"Game.SendInfoText(\"Your partner hit you! (-{amount} HP)\")");
+                    }
+                    break;
+                }
+
+                case EventType.NpcDamage:
+                {
+                    var nameMatch = Regex.Match(json, @"""entity""\s*:\s*""([^""]+)""");
+                    var amtMatch = Regex.Match(json, @"""amount""\s*:\s*(\d+)");
+                    if (nameMatch.Success && amtMatch.Success
+                        && !string.IsNullOrEmpty(nameMatch.Groups[1].Value)
+                        && int.TryParse(amtMatch.Groups[1].Value, out var npcDmg))
+                    {
+                        var safeName = EscapeLua(nameMatch.Groups[1].Value);
+                        await ExecLuaAsync(
+                            $"KCD2MP_HandleNpcDamage(\"{safeName}\",{npcDmg})");
+                    }
+                    break;
+                }
+
+                case EventType.PlayerDied:
+                {
+                    await ExecLuaAsync(
+                        "Game.SendInfoText(\"Your partner has fallen!\");" +
+                        "player.soul:DealDamage(99999,99999,__null,true)");
+                    _logger.Warning("[event-in] Partner died — triggering mutual game-over");
+                    break;
+                }
+
+                case EventType.PlayerDowned:
+                {
+                    await ExecLuaAsync(
+                        "Game.SendInfoText(\"Your partner is down! Get to them!\")");
+                    break;
+                }
+
+                case EventType.Revive:
+                {
+                    await ExecLuaAsync(
+                        "Game.SendInfoText(\"You have been revived!\")");
+                    break;
+                }
+            }
+        }
+        catch (Exception ex) { _logger.Warning(ex, "[event-in] Error handling event {Type}", (EventType)eventType); }
     }
 
     // -------------------------------------------------------------------------
@@ -302,7 +558,7 @@ public partial class GameBridge(string serverHost, int serverPort, string passwo
 
     /// <summary>
     /// Reads local player position via a single HTTP call (GET PlayerSoul).
-    /// Rotation and riding state come from the background RotStateLoopAsync.
+    /// Rotation and riding state come from the background StateLoopAsync.
     /// </summary>
     private async Task<(float x, float y, float z)?> ReadPositionAsync()
     {

@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using Serilog;
+using KcdMp.Shared.Protocol;
 
 namespace KcdMp.Server;
 
@@ -99,5 +100,29 @@ public class RelayServer(int port, bool echo = false, string password = "", ILog
 
         foreach (var c in existing)
             newClient.EnqueueName(c.Id, c.Name!);
+    }
+
+    /// <summary>Broadcasts a StateSync (0x08) packet to all other ready clients.</summary>
+    public void BroadcastState(ClientSession source, byte stateType, byte[] payload)
+    {
+        List<ClientSession> targets;
+        lock (_lock)
+            targets = [.. _clients.Where(c => c != source && c.IsReady)];
+
+        var packet = PacketWriter.StateSync(source.Id, stateType, payload);
+        foreach (var target in targets)
+            target.EnqueueRaw(packet);
+    }
+
+    /// <summary>Broadcasts an EventRelay (0x0A) packet to all other ready clients.</summary>
+    public void BroadcastEvent(ClientSession source, ushort eventType, byte[] jsonPayload)
+    {
+        List<ClientSession> targets;
+        lock (_lock)
+            targets = [.. _clients.Where(c => c != source && c.IsReady)];
+
+        var packet = PacketWriter.EventRelay(source.Id, eventType, jsonPayload);
+        foreach (var target in targets)
+            target.EnqueueRaw(packet);
     }
 }

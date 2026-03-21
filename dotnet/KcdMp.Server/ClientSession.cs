@@ -98,11 +98,23 @@ public class ClientSession
                     continue;
                 }
 
-                if (packet.Type != PacketType.Position || (packet.Payload.Length != 16 && packet.Payload.Length != 17))
-                    continue;
+                switch (packet.Type)
+                {
+                    case PacketType.Position when packet.Payload.Length is 16 or 17:
+                        var (x, y, z, rotZ, flags) = PacketReader.ParsePosition(packet.Payload);
+                        _server.Broadcast(this, x, y, z, rotZ, flags);
+                        break;
 
-                var (x, y, z, rotZ, flags) = PacketReader.ParsePosition(packet.Payload);
-                _server.Broadcast(this, x, y, z, rotZ, flags);
+                    case PacketType.StateUpdate when packet.Payload.Length >= 1:
+                        var (stateType, statePayload) = PacketReader.ParseStateUpdate(packet.Payload);
+                        _server.BroadcastState(this, stateType, statePayload);
+                        break;
+
+                    case PacketType.Event when packet.Payload.Length >= 2:
+                        var (eventType, jsonPayload) = PacketReader.ParseEvent(packet.Payload);
+                        _server.BroadcastEvent(this, eventType, jsonPayload);
+                        break;
+                }
             }
         }
         catch (Exception ex) when (ex is IOException or SocketException or EndOfStreamException)
@@ -129,7 +141,8 @@ public class ClientSession
     public void EnqueueName(byte ghostId, string name)
         => EnqueueRaw(PacketWriter.NamePacket(ghostId, name));
 
-    private void EnqueueRaw(byte[] packet) =>
+    /// <summary>Thread-safe: enqueue a raw packet to be sent to this client.</summary>
+    public void EnqueueRaw(byte[] packet) =>
         _writeQueue.Writer.TryWrite(packet);
 
     private async Task WriteLoopAsync()
