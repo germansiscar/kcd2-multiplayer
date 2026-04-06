@@ -55,6 +55,14 @@ public enum ServerObservableEventType
     InventorySaveFailed = 32,
     InventoryChanged = 33,
     InventoryValidationFailed = 34,
+    CurrencyLoadStarted = 35,
+    CurrencyLoadCompleted = 36,
+    CurrencyLoadFailed = 37,
+    CurrencySaveStarted = 38,
+    CurrencySaveCompleted = 39,
+    CurrencySaveFailed = 40,
+    CurrencyChanged = 41,
+    CurrencyValidationFailed = 42,
 }
 
 public sealed record ServerObservableEvent(
