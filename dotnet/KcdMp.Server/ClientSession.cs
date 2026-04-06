@@ -140,6 +140,10 @@ public class ClientSession
         {
             // Normal disconnect
         }
+        catch (Exception ex)
+        {
+            _server.EmitBackendError(SessionId, "Unhandled exception in client session loop.", ex);
+        }
         finally
         {
             _writeQueue.Writer.Complete();

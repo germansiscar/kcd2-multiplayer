@@ -1,32 +1,55 @@
 using System.Net;
 using System.Net.Sockets;
-using Serilog;
-using KcdMp.Shared.Protocol;
+using KcdMp.Server.Observability;
 using KcdMp.Server.Sessions;
+using KcdMp.Shared.Protocol;
+using Serilog;
 
 namespace KcdMp.Server;
 
-public class RelayServer(
-    int port,
-    bool echo = false,
-    string password = "",
-    TimeSpan? sessionIdleTimeout = null,
-    ILogger? logger = null)
+public class RelayServer
 {
+    private readonly int _port;
     private readonly List<ClientSession> _clients = [];
     private readonly List<Task> _sessionTasks = [];
-    private readonly ServerSessionBackend _sessionBackend = new(sessionIdleTimeout);
+    private readonly ServerSessionBackend _sessionBackend;
     private readonly Dictionary<Guid, ClientSession> _clientsBySessionId = [];
     private readonly object _lock = new();
-    private readonly ILogger _logger = logger ?? Log.Logger;
-    public bool Echo { get; } = echo;
-    public string Password { get; } = password;
+    private readonly ILogger _logger;
+    private readonly IServerObservabilitySink _observability;
+
+    public RelayServer(
+        int port,
+        bool echo = false,
+        string password = "",
+        TimeSpan? sessionIdleTimeout = null,
+        ILogger? logger = null,
+        IServerObservabilitySink? observability = null,
+        ServerObservabilityOptions? observabilityOptions = null)
+    {
+        _port = port;
+        Echo = echo;
+        Password = password;
+        _logger = logger ?? Log.Logger;
+        _sessionBackend = new ServerSessionBackend(sessionIdleTimeout);
+        _sessionBackend.LifecycleEventEmitted += HandleSessionLifecycleEvent;
+        _observability = observability ?? new SerilogServerObservabilitySink(_logger, observabilityOptions);
+    }
+
+    public bool Echo { get; }
+    public string Password { get; }
 
     public async Task RunAsync(CancellationToken ct = default)
     {
-        var listener = new TcpListener(IPAddress.Any, port);
+        var listener = new TcpListener(IPAddress.Any, _port);
         listener.Start();
-        _logger.Information("Listening on port {Port}...", port);
+        Emit(
+            ServerObservableEventType.ServerStarted,
+            ServerObservableComponent.ServerLifecycle,
+            ServerObservableSeverity.Information,
+            "Relay server started.",
+            payload: new Dictionary<string, object?> { ["port"] = _port });
+        _logger.Information("Listening on port {Port}...", _port);
         _logger.Information("Waiting for clients to connect.");
         var timeoutTask = MonitorIdleSessionsAsync(ct);
 
@@ -45,13 +68,28 @@ public class RelayServer(
                     _clientsBySessionId[session.SessionId] = session;
                 }
 
-                var sessionTask = session.RunAsync().ContinueWith(_ =>
+                var sessionTask = session.RunAsync().ContinueWith(task =>
                 {
                     lock (_lock)
                     {
                         _clients.Remove(session);
                         _clientsBySessionId.Remove(session.SessionId);
                         _sessionTasks.RemoveAll(x => x.IsCompleted);
+                    }
+
+                    if (task.IsFaulted)
+                    {
+                        Emit(
+                            ServerObservableEventType.BackendError,
+                            ServerObservableComponent.Backend,
+                            ServerObservableSeverity.Error,
+                            "Unexpected client session failure.",
+                            session.SessionId,
+                            new Dictionary<string, object?>
+                            {
+                                ["exception"] = task.Exception?.GetBaseException().Message,
+                                ["close_reason"] = session.CloseReason.ToString(),
+                            });
                     }
 
                     _sessionBackend.CloseSession(session.SessionId, session.CloseReason);
@@ -69,6 +107,16 @@ public class RelayServer(
         {
             // Server cancellation is expected for Ctrl+C / process shutdown.
         }
+        catch (Exception ex)
+        {
+            Emit(
+                ServerObservableEventType.BackendError,
+                ServerObservableComponent.Backend,
+                ServerObservableSeverity.Error,
+                "Relay server loop failed.",
+                payload: new Dictionary<string, object?> { ["exception"] = ex.Message });
+            throw;
+        }
         finally
         {
             listener.Stop();
@@ -78,6 +126,13 @@ public class RelayServer(
                 runningSessions = [.. _sessionTasks];
             await Task.WhenAll(runningSessions);
             try { await timeoutTask; } catch (OperationCanceledException) { }
+
+            Emit(
+                ServerObservableEventType.ServerStopped,
+                ServerObservableComponent.ServerLifecycle,
+                ServerObservableSeverity.Information,
+                "Relay server stopped.",
+                payload: new Dictionary<string, object?> { ["port"] = _port });
         }
     }
 
@@ -181,6 +236,17 @@ public class RelayServer(
     internal void MarkAuthenticationRejected(Guid sessionId)
         => _sessionBackend.MarkAuthenticationRejected(sessionId);
 
+    internal void EmitBackendError(Guid? sessionId, string message, Exception? ex = null)
+    {
+        Emit(
+            ServerObservableEventType.BackendError,
+            ServerObservableComponent.Backend,
+            ServerObservableSeverity.Error,
+            message,
+            sessionId,
+            new Dictionary<string, object?> { ["exception"] = ex?.Message });
+    }
+
     private async Task MonitorIdleSessionsAsync(CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
@@ -210,5 +276,58 @@ public class RelayServer(
 
         foreach (var session in active)
             session.RequestClose(ServerSessionCloseReason.Shutdown);
+    }
+
+    private void HandleSessionLifecycleEvent(ServerSessionLifecycleEvent lifecycleEvent)
+    {
+        var eventType = lifecycleEvent.Type switch
+        {
+            ServerSessionLifecycleEventType.SessionCreated => ServerObservableEventType.SessionCreated,
+            ServerSessionLifecycleEventType.AuthenticationAccepted => ServerObservableEventType.AuthenticationAccepted,
+            ServerSessionLifecycleEventType.AuthenticationRejected => ServerObservableEventType.AuthenticationRejected,
+            ServerSessionLifecycleEventType.AssociationPending => ServerObservableEventType.AssociationPending,
+            ServerSessionLifecycleEventType.SessionClosed => ServerObservableEventType.SessionClosed,
+            _ => ServerObservableEventType.BackendError,
+        };
+
+        var severity = lifecycleEvent.Type switch
+        {
+            ServerSessionLifecycleEventType.AuthenticationRejected => ServerObservableSeverity.Warning,
+            _ => ServerObservableSeverity.Information,
+        };
+
+        var payload = lifecycleEvent.CloseReason is null
+            ? null
+            : new Dictionary<string, object?> { ["close_reason"] = lifecycleEvent.CloseReason.ToString() };
+
+        Emit(eventType, ServerObservableComponent.Session, severity, lifecycleEvent.Type.ToString(), lifecycleEvent.SessionId, payload);
+
+        if (lifecycleEvent.CloseReason == ServerSessionCloseReason.Timeout)
+        {
+            Emit(
+                ServerObservableEventType.SessionTimeout,
+                ServerObservableComponent.Session,
+                ServerObservableSeverity.Warning,
+                "Session closed by timeout.",
+                lifecycleEvent.SessionId);
+        }
+    }
+
+    private void Emit(
+        ServerObservableEventType type,
+        ServerObservableComponent component,
+        ServerObservableSeverity severity,
+        string message,
+        Guid? sessionId = null,
+        IReadOnlyDictionary<string, object?>? payload = null)
+    {
+        _observability.Emit(new ServerObservableEvent(
+            type,
+            component,
+            severity,
+            DateTimeOffset.UtcNow,
+            SessionId: sessionId,
+            Message: message,
+            Payload: payload));
     }
 }

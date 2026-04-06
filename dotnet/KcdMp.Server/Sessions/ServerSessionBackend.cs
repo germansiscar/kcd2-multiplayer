@@ -95,6 +95,7 @@ public sealed class ServerSessionBackend
     private readonly Dictionary<string, Guid> _identityToSession = new(StringComparer.Ordinal);
     private readonly List<ServerSessionLifecycleEvent> _events = [];
     private readonly object _lock = new();
+    public event Action<ServerSessionLifecycleEvent>? LifecycleEventEmitted;
 
     public ServerSessionBackend(TimeSpan? idleTimeout = null)
     {
@@ -304,10 +305,13 @@ public sealed class ServerSessionBackend
         DateTimeOffset occurredAtUtc,
         ServerSessionCloseReason? closeReason = null)
     {
-        _events.Add(new ServerSessionLifecycleEvent(type, sessionId, occurredAtUtc, closeReason));
+        var lifecycleEvent = new ServerSessionLifecycleEvent(type, sessionId, occurredAtUtc, closeReason);
+        _events.Add(lifecycleEvent);
         const int maxEvents = 2048;
         if (_events.Count > maxEvents)
             _events.RemoveRange(0, _events.Count - maxEvents);
+
+        LifecycleEventEmitted?.Invoke(lifecycleEvent);
     }
 }
 
