@@ -23,6 +23,9 @@ public class KcdmpConfig
     public string CharacterId { get; set; } = "";
     public bool IdentityRequireWhitelist { get; set; } = false;
     public bool CharacterRequireOnConnect { get; set; } = false;
+    public long CurrencyInitialBalance { get; set; } = 0;
+    public int CurrencySaveRetryCount { get; set; } = 1;
+    public int CurrencySaveRetryDelayMs { get; set; } = 100;
     public string ObservabilityMinSeverity { get; set; } = "Information";
     public bool ObservabilityIncludeSyncMicroEvents { get; set; } = false;
 

@@ -19,6 +19,9 @@ public class KcdmpConfigTests
         Assert.Equal("", config.SteamId);
         Assert.Equal("", config.CharacterId);
         Assert.False(config.CharacterRequireOnConnect);
+        Assert.Equal(0, config.CurrencyInitialBalance);
+        Assert.Equal(1, config.CurrencySaveRetryCount);
+        Assert.Equal(100, config.CurrencySaveRetryDelayMs);
     }
 
     [Fact]
@@ -34,6 +37,9 @@ public class KcdmpConfigTests
             SteamId = "steam_1",
             CharacterId = "cid_123",
             CharacterRequireOnConnect = true,
+            CurrencyInitialBalance = 250,
+            CurrencySaveRetryCount = 3,
+            CurrencySaveRetryDelayMs = 400,
         };
         var json = config.ToJson();
         var loaded = KcdmpConfig.FromJson(json);
@@ -45,6 +51,9 @@ public class KcdmpConfigTests
         Assert.Equal("steam_1", loaded.SteamId);
         Assert.Equal("cid_123", loaded.CharacterId);
         Assert.True(loaded.CharacterRequireOnConnect);
+        Assert.Equal(250, loaded.CurrencyInitialBalance);
+        Assert.Equal(3, loaded.CurrencySaveRetryCount);
+        Assert.Equal(400, loaded.CurrencySaveRetryDelayMs);
     }
 
     [Fact]

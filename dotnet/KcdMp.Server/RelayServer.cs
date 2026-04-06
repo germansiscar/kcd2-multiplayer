@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using KcdMp.Server.Characters;
+using KcdMp.Server.Currency;
 using KcdMp.Server.Identity;
 using KcdMp.Server.Inventory;
 using KcdMp.Server.Observability;
@@ -22,6 +23,7 @@ public class RelayServer
     private readonly ICharacterSessionBindingService _characterBindingService;
     private readonly ICharacterLifecycleService _characterLifecycleService;
     private readonly ICharacterInventoryService _characterInventoryService;
+    private readonly ICharacterCurrencyService _characterCurrencyService;
     private readonly Dictionary<Guid, ClientSession> _clientsBySessionId = [];
     private readonly object _lock = new();
     private readonly ILogger _logger;
@@ -37,6 +39,7 @@ public class RelayServer
         CharacterSessionBindingOptions? characterBindingOptions = null,
         CharacterLifecycleOptions? characterLifecycleOptions = null,
         CharacterInventoryOptions? characterInventoryOptions = null,
+        CharacterCurrencyOptions? characterCurrencyOptions = null,
         ILogger? logger = null,
         IServerObservabilitySink? observability = null,
         ServerObservabilityOptions? observabilityOptions = null,
@@ -45,7 +48,8 @@ public class RelayServer
         ICharacterProfileService? characterProfileService = null,
         ICharacterSessionBindingService? characterBindingService = null,
         ICharacterLifecycleService? characterLifecycleService = null,
-        ICharacterInventoryService? characterInventoryService = null)
+        ICharacterInventoryService? characterInventoryService = null,
+        ICharacterCurrencyService? characterCurrencyService = null)
     {
         _port = port;
         Echo = echo;
@@ -82,6 +86,12 @@ public class RelayServer
                                         store,
                                         _observability,
                                         characterInventoryOptions,
+                                        _logger);
+        _characterCurrencyService = characterCurrencyService
+                                    ?? new CharacterCurrencyService(
+                                        store,
+                                        _observability,
+                                        characterCurrencyOptions,
                                         _logger);
     }
 
@@ -175,6 +185,7 @@ public class RelayServer
             lock (_lock)
                 runningSessions = [.. _sessionTasks];
             await Task.WhenAll(runningSessions);
+            await _characterCurrencyService.SaveAndUnloadAllAsync(CharacterLifecycleSaveReason.Shutdown, CancellationToken.None);
             await _characterInventoryService.SaveAndUnloadAllAsync(CharacterLifecycleSaveReason.Shutdown, CancellationToken.None);
             await _characterLifecycleService.SaveAndUnloadAllAsync(CharacterLifecycleSaveReason.Shutdown, CancellationToken.None);
             try { await timeoutTask; } catch (OperationCanceledException) { }
@@ -405,6 +416,37 @@ public class RelayServer
                     });
                 return (false, inventoryLoad.DenialReason ?? "Inventory load failed.", resolved.Identity.InternalId);
             }
+
+            var currencyLoad = await _characterCurrencyService.LoadForSessionAsync(
+                sessionId,
+                resolved.Identity.InternalId,
+                binding.CharacterId!,
+                ct);
+            if (!currencyLoad.Loaded)
+            {
+                await _characterInventoryService.SaveAndUnloadSessionAsync(
+                    sessionId,
+                    CharacterLifecycleSaveReason.SessionClosed,
+                    ct);
+                await _characterLifecycleService.SaveAndUnloadSessionAsync(
+                    sessionId,
+                    CharacterLifecycleSaveReason.SessionClosed,
+                    ct);
+                _sessionBackend.ClearIdentityAssociation(sessionId);
+                Emit(
+                    ServerObservableEventType.CurrencyLoadFailed,
+                    ServerObservableComponent.Session,
+                    ServerObservableSeverity.Warning,
+                    "Currency load failed while preparing session.",
+                    sessionId,
+                    payload: new Dictionary<string, object?>
+                    {
+                        ["identity_id"] = resolved.Identity.InternalId,
+                        ["character_id"] = binding.CharacterId,
+                        ["reason"] = currencyLoad.DenialReason,
+                    });
+                return (false, currencyLoad.DenialReason ?? "Currency load failed.", resolved.Identity.InternalId);
+            }
         }
 
         _sessionBackend.SetCharacterReference(sessionId, binding.CharacterId);
@@ -420,6 +462,24 @@ public class RelayServer
             ServerSessionCloseReason.Shutdown => CharacterLifecycleSaveReason.Shutdown,
             _ => CharacterLifecycleSaveReason.SessionClosed,
         };
+
+        try
+        {
+            _characterCurrencyService
+                .SaveAndUnloadSessionAsync(sessionId, saveReason)
+                .GetAwaiter()
+                .GetResult();
+        }
+        catch (Exception ex)
+        {
+            Emit(
+                ServerObservableEventType.CurrencySaveFailed,
+                ServerObservableComponent.Persistence,
+                ServerObservableSeverity.Error,
+                "Currency save on session close failed.",
+                sessionId,
+                payload: new Dictionary<string, object?> { ["exception"] = ex.Message });
+        }
 
         try
         {

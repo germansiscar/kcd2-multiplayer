@@ -1,5 +1,6 @@
 using KcdMp.Client;
 using KcdMp.Server.Characters;
+using KcdMp.Server.Currency;
 using KcdMp.Server.Identity;
 using KcdMp.Server;
 using KcdMp.Server.Observability;
@@ -47,18 +48,26 @@ var characterBindingOptions = new CharacterSessionBindingOptions
 {
     RequireCharacterOnConnect = config.CharacterRequireOnConnect,
 };
+var currencyOptions = new CharacterCurrencyOptions
+{
+    InitialBalance = config.CurrencyInitialBalance,
+    SaveRetryCount = config.CurrencySaveRetryCount,
+    SaveRetryDelay = TimeSpan.FromMilliseconds(Math.Max(0, config.CurrencySaveRetryDelayMs)),
+};
 
 if (config.Mode == "host")
 {
     Log.Information("Port    : {Port}", config.Port);
     Log.Information("Password: {Password}", string.IsNullOrEmpty(config.Password) ? "(none)" : "****");
     Log.Information("Observability severity: {Severity}", observabilityOptions.MinimumSeverity);
+    Log.Information("Currency initial balance: {Balance}", currencyOptions.InitialBalance);
 
     var server = new RelayServer(
         config.Port,
         password: config.Password,
         identityOptions: identityOptions,
         characterBindingOptions: characterBindingOptions,
+        characterCurrencyOptions: currencyOptions,
         observabilityOptions: observabilityOptions);
     _ = server.RunAsync(cts.Token);
 
