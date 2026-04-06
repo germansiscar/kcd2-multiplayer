@@ -9,6 +9,7 @@ public static class JsonPersistenceDomains
     public const string Characters = "characters";
     public const string Inventory = "inventory";
     public const string Currency = "currency";
+    public const string Respawn = "respawn";
     public const string Economy = "economy";
     public const string Audit = "audit";
     public const string Config = "config";
@@ -19,6 +20,7 @@ public static class JsonPersistenceDomains
         Characters,
         Inventory,
         Currency,
+        Respawn,
         Economy,
         Audit,
         Config,

@@ -22,6 +22,11 @@ public class KcdmpConfigTests
         Assert.Equal(0, config.CurrencyInitialBalance);
         Assert.Equal(1, config.CurrencySaveRetryCount);
         Assert.Equal(100, config.CurrencySaveRetryDelayMs);
+        Assert.Equal(300, config.RespawnUnconsciousDurationSeconds);
+        Assert.Equal("default", config.RespawnDefaultPolicyId);
+        Assert.Equal("default_spawn", config.RespawnDefaultPointId);
+        Assert.Equal(1, config.RespawnSaveRetryCount);
+        Assert.Equal(100, config.RespawnSaveRetryDelayMs);
     }
 
     [Fact]
@@ -40,6 +45,11 @@ public class KcdmpConfigTests
             CurrencyInitialBalance = 250,
             CurrencySaveRetryCount = 3,
             CurrencySaveRetryDelayMs = 400,
+            RespawnUnconsciousDurationSeconds = 420,
+            RespawnDefaultPolicyId = "town_bed",
+            RespawnDefaultPointId = "rattay_square",
+            RespawnSaveRetryCount = 2,
+            RespawnSaveRetryDelayMs = 250,
         };
         var json = config.ToJson();
         var loaded = KcdmpConfig.FromJson(json);
@@ -54,6 +64,11 @@ public class KcdmpConfigTests
         Assert.Equal(250, loaded.CurrencyInitialBalance);
         Assert.Equal(3, loaded.CurrencySaveRetryCount);
         Assert.Equal(400, loaded.CurrencySaveRetryDelayMs);
+        Assert.Equal(420, loaded.RespawnUnconsciousDurationSeconds);
+        Assert.Equal("town_bed", loaded.RespawnDefaultPolicyId);
+        Assert.Equal("rattay_square", loaded.RespawnDefaultPointId);
+        Assert.Equal(2, loaded.RespawnSaveRetryCount);
+        Assert.Equal(250, loaded.RespawnSaveRetryDelayMs);
     }
 
     [Fact]

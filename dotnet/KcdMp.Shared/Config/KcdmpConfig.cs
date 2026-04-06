@@ -26,6 +26,11 @@ public class KcdmpConfig
     public long CurrencyInitialBalance { get; set; } = 0;
     public int CurrencySaveRetryCount { get; set; } = 1;
     public int CurrencySaveRetryDelayMs { get; set; } = 100;
+    public int RespawnUnconsciousDurationSeconds { get; set; } = 300;
+    public string RespawnDefaultPolicyId { get; set; } = "default";
+    public string RespawnDefaultPointId { get; set; } = "default_spawn";
+    public int RespawnSaveRetryCount { get; set; } = 1;
+    public int RespawnSaveRetryDelayMs { get; set; } = 100;
     public string ObservabilityMinSeverity { get; set; } = "Information";
     public bool ObservabilityIncludeSyncMicroEvents { get; set; } = false;
 
