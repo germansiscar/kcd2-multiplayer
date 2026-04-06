@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Sockets;
 using KcdMp.Server.Characters;
 using KcdMp.Server.Identity;
+using KcdMp.Server.Inventory;
 using KcdMp.Server.Observability;
 using KcdMp.Server.Persistence;
 using KcdMp.Server.Sessions;
@@ -20,6 +21,7 @@ public class RelayServer
     private readonly ICharacterProfileService _characterProfileService;
     private readonly ICharacterSessionBindingService _characterBindingService;
     private readonly ICharacterLifecycleService _characterLifecycleService;
+    private readonly ICharacterInventoryService _characterInventoryService;
     private readonly Dictionary<Guid, ClientSession> _clientsBySessionId = [];
     private readonly object _lock = new();
     private readonly ILogger _logger;
@@ -34,6 +36,7 @@ public class RelayServer
         PlayerIdentityOptions? identityOptions = null,
         CharacterSessionBindingOptions? characterBindingOptions = null,
         CharacterLifecycleOptions? characterLifecycleOptions = null,
+        CharacterInventoryOptions? characterInventoryOptions = null,
         ILogger? logger = null,
         IServerObservabilitySink? observability = null,
         ServerObservabilityOptions? observabilityOptions = null,
@@ -41,7 +44,8 @@ public class RelayServer
         IPlayerIdentityService? identityService = null,
         ICharacterProfileService? characterProfileService = null,
         ICharacterSessionBindingService? characterBindingService = null,
-        ICharacterLifecycleService? characterLifecycleService = null)
+        ICharacterLifecycleService? characterLifecycleService = null,
+        ICharacterInventoryService? characterInventoryService = null)
     {
         _port = port;
         Echo = echo;
@@ -73,6 +77,12 @@ public class RelayServer
                                          _observability,
                                          characterLifecycleOptions,
                                          _logger);
+        _characterInventoryService = characterInventoryService
+                                    ?? new CharacterInventoryService(
+                                        store,
+                                        _observability,
+                                        characterInventoryOptions,
+                                        _logger);
     }
 
     public bool Echo { get; }
@@ -165,6 +175,7 @@ public class RelayServer
             lock (_lock)
                 runningSessions = [.. _sessionTasks];
             await Task.WhenAll(runningSessions);
+            await _characterInventoryService.SaveAndUnloadAllAsync(CharacterLifecycleSaveReason.Shutdown, CancellationToken.None);
             await _characterLifecycleService.SaveAndUnloadAllAsync(CharacterLifecycleSaveReason.Shutdown, CancellationToken.None);
             try { await timeoutTask; } catch (OperationCanceledException) { }
 
@@ -367,6 +378,33 @@ public class RelayServer
                     });
                 return (false, loadResult.DenialReason ?? "Character load failed.", resolved.Identity.InternalId);
             }
+
+            var inventoryLoad = await _characterInventoryService.LoadForSessionAsync(
+                sessionId,
+                resolved.Identity.InternalId,
+                binding.CharacterId!,
+                ct);
+            if (!inventoryLoad.Loaded)
+            {
+                await _characterLifecycleService.SaveAndUnloadSessionAsync(
+                    sessionId,
+                    CharacterLifecycleSaveReason.SessionClosed,
+                    ct);
+                _sessionBackend.ClearIdentityAssociation(sessionId);
+                Emit(
+                    ServerObservableEventType.InventoryLoadFailed,
+                    ServerObservableComponent.Session,
+                    ServerObservableSeverity.Warning,
+                    "Inventory load failed while preparing session.",
+                    sessionId,
+                    payload: new Dictionary<string, object?>
+                    {
+                        ["identity_id"] = resolved.Identity.InternalId,
+                        ["character_id"] = binding.CharacterId,
+                        ["reason"] = inventoryLoad.DenialReason,
+                    });
+                return (false, inventoryLoad.DenialReason ?? "Inventory load failed.", resolved.Identity.InternalId);
+            }
         }
 
         _sessionBackend.SetCharacterReference(sessionId, binding.CharacterId);
@@ -382,6 +420,24 @@ public class RelayServer
             ServerSessionCloseReason.Shutdown => CharacterLifecycleSaveReason.Shutdown,
             _ => CharacterLifecycleSaveReason.SessionClosed,
         };
+
+        try
+        {
+            _characterInventoryService
+                .SaveAndUnloadSessionAsync(sessionId, saveReason)
+                .GetAwaiter()
+                .GetResult();
+        }
+        catch (Exception ex)
+        {
+            Emit(
+                ServerObservableEventType.InventorySaveFailed,
+                ServerObservableComponent.Persistence,
+                ServerObservableSeverity.Error,
+                "Inventory save on session close failed.",
+                sessionId,
+                payload: new Dictionary<string, object?> { ["exception"] = ex.Message });
+        }
 
         try
         {
