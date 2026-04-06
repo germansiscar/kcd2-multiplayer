@@ -24,3 +24,10 @@ Thumbs.db
 probes/phase2/*.pak
 probes/phase2/scripts_extracted/
 probes/phase2/tables_extracted/
+
+# Local planning and documentation snapshots
+AGENTS.md
+docs/
+
+# Local build logs
+dotnet/*.binlog
