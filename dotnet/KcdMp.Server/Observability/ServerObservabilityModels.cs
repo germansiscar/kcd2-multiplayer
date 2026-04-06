@@ -37,6 +37,10 @@ public enum ServerObservableEventType
     IdentityCreated = 14,
     IdentityAccessDenied = 15,
     IdentityStatusChanged = 16,
+    CharacterCreated = 17,
+    CharacterStatusChanged = 18,
+    CharacterDeleted = 19,
+    CharacterAccessDenied = 20,
 }
 
 public sealed record ServerObservableEvent(
