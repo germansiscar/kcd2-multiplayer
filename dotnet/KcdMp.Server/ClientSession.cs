@@ -1,5 +1,7 @@
 using System.Net.Sockets;
+using System.Text.Json;
 using System.Threading.Channels;
+using KcdMp.Server.Identity;
 using Serilog;
 using KcdMp.Shared.Protocol;
 using KcdMp.Server.Sessions;
@@ -92,10 +94,23 @@ public class ClientSession
                 _logger.Warning("[!] Client sent bad handshake type 0x{PacketType:X2}, dropping.", (byte)hsPacket.Type);
                 return;
             }
-            Name = PacketReader.ReadUtf8(hsPacket.Payload, 0, hsPacket.Payload.Length);
+            var handshakePayload = PacketReader.ReadUtf8(hsPacket.Payload, 0, hsPacket.Payload.Length);
+            var claim = ParseIdentityClaim(handshakePayload);
+            var (allowed, reason, identityId) = await _server.ResolveAndAssociateIdentityAsync(SessionId, claim);
+            if (!allowed)
+            {
+                _server.MarkAuthenticationRejected(SessionId);
+                CloseReason = ServerSessionCloseReason.AuthenticationRejected;
+                EnqueueRaw(PacketWriter.AuthResult(false, reason ?? "Identity rejected"));
+                await Task.Delay(100);
+                return;
+            }
+
+            Name = claim.DisplayName;
 
             _logger.Information("[+] '{Name}' connected (id={Id}) from {RemoteEndPoint}. Clients: active",
                 Name, Id, _tcp.Client.RemoteEndPoint);
+            _logger.Information("[identity] Session {SessionId} associated to {IdentityId}", SessionId, identityId);
 
             // Send Ack with assigned ID
             EnqueueRaw(PacketWriter.Ack(Id));
@@ -188,6 +203,48 @@ public class ClientSession
             try { await _stream.WriteAsync(packet); }
             catch { break; }
         }
+    }
+
+    private static PlayerIdentityClaim ParseIdentityClaim(string handshakePayload)
+    {
+        if (string.IsNullOrWhiteSpace(handshakePayload))
+            return new PlayerIdentityClaim("Unknown", null, null);
+
+        var trimmed = handshakePayload.Trim();
+        if (!trimmed.StartsWith('{'))
+            return new PlayerIdentityClaim(trimmed, null, null);
+
+        try
+        {
+            using var doc = JsonDocument.Parse(trimmed);
+            var root = doc.RootElement;
+
+            string displayName = ReadOptionalString(root, "displayName")
+                                 ?? ReadOptionalString(root, "name")
+                                 ?? "Unknown";
+            string? persistentToken = ReadOptionalString(root, "persistentToken")
+                                      ?? ReadOptionalString(root, "token");
+            string? steamId = ReadOptionalString(root, "steamId");
+
+            var normalizedName = string.IsNullOrWhiteSpace(displayName) ? "Unknown" : displayName.Trim();
+            return new PlayerIdentityClaim(normalizedName, persistentToken?.Trim(), steamId?.Trim());
+        }
+        catch
+        {
+            return new PlayerIdentityClaim(trimmed, null, null);
+        }
+    }
+
+    private static string? ReadOptionalString(JsonElement root, string propertyName)
+    {
+        if (!root.TryGetProperty(propertyName, out var node))
+            return null;
+
+        if (node.ValueKind != JsonValueKind.String)
+            return null;
+
+        var value = node.GetString();
+        return string.IsNullOrWhiteSpace(value) ? null : value;
     }
 
 }

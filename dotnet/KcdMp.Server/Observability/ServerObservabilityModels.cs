@@ -33,6 +33,10 @@ public enum ServerObservableEventType
     PersistenceLoadFailed = 10,
     PersistenceSaveCompleted = 11,
     PersistenceSaveFailed = 12,
+    IdentityResolved = 13,
+    IdentityCreated = 14,
+    IdentityAccessDenied = 15,
+    IdentityStatusChanged = 16,
 }
 
 public sealed record ServerObservableEvent(

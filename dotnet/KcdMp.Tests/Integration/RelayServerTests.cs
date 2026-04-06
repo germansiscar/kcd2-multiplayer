@@ -1,4 +1,5 @@
 using System.Net.Sockets;
+using KcdMp.Server.Persistence;
 using KcdMp.Shared.Protocol;
 
 namespace KcdMp.Tests.Integration;
@@ -9,13 +10,18 @@ public class RelayServerTests : IAsyncLifetime
     private KcdMp.Server.RelayServer _server = null!;
     private Task _serverTask = null!;
     private CancellationTokenSource _cts = null!;
+    private string _persistenceRoot = "";
     private const int TestPort = 17778;
     private const string TestPassword = "testpass";
 
     public async Task InitializeAsync()
     {
         _cts = new CancellationTokenSource();
-        _server = new KcdMp.Server.RelayServer(TestPort, password: TestPassword);
+        _persistenceRoot = Path.Combine(Path.GetTempPath(), $"kcdmp_relay_test_{Guid.NewGuid():N}");
+        _server = new KcdMp.Server.RelayServer(
+            TestPort,
+            password: TestPassword,
+            persistenceOptions: new JsonPersistenceOptions { BasePath = _persistenceRoot });
         _serverTask = _server.RunAsync(_cts.Token);
         await Task.Delay(200);
     }
@@ -24,6 +30,8 @@ public class RelayServerTests : IAsyncLifetime
     {
         _cts.Cancel();
         try { await _serverTask; } catch { }
+        if (Directory.Exists(_persistenceRoot))
+            Directory.Delete(_persistenceRoot, recursive: true);
     }
 
     [Fact]
@@ -137,6 +145,28 @@ public class RelayServerTests : IAsyncLifetime
         Assert.Equal(id1, srcId);
         Assert.Equal(eventType, parsedEvt);
         Assert.Equal(json, parsedJson);
+    }
+
+    [Fact]
+    public async Task Client_WithSameIdentityFallbackName_IsRejectedWhenAlreadyConnected()
+    {
+        var (tcp1, _, _) = await ConnectClientAsync("SameName");
+        using var _ = tcp1;
+
+        using var tcp2 = new TcpClient();
+        await tcp2.ConnectAsync("127.0.0.1", TestPort);
+        var stream2 = tcp2.GetStream();
+
+        await stream2.WriteAsync(PacketWriter.Auth(TestPassword));
+        var authResponse = await stream2.ReadPacketAsync();
+        Assert.Equal(PacketType.AuthResult, authResponse.Type);
+        Assert.True(PacketReader.ParseAuthResult(authResponse.Payload).ok);
+
+        await stream2.WriteAsync(PacketWriter.Handshake("SameName"));
+        var rejected = await stream2.ReadPacketAsync();
+
+        Assert.Equal(PacketType.AuthResult, rejected.Type);
+        Assert.False(PacketReader.ParseAuthResult(rejected.Payload).ok);
     }
 
     private async Task<(TcpClient tcp, NetworkStream stream, byte id)> ConnectClientAsync(string name)

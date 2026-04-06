@@ -1,4 +1,5 @@
 using KcdMp.Client;
+using KcdMp.Server.Identity;
 using KcdMp.Server;
 using KcdMp.Server.Observability;
 using KcdMp.Shared.Config;
@@ -37,6 +38,10 @@ var observabilityOptions = new ServerObservabilityOptions
     MinimumSeverity = ParseObservabilitySeverity(config.ObservabilityMinSeverity),
     IncludeSyncMicroEvents = config.ObservabilityIncludeSyncMicroEvents,
 };
+var identityOptions = new PlayerIdentityOptions
+{
+    RequireWhitelistForPendingIdentity = config.IdentityRequireWhitelist,
+};
 
 if (config.Mode == "host")
 {
@@ -44,7 +49,11 @@ if (config.Mode == "host")
     Log.Information("Password: {Password}", string.IsNullOrEmpty(config.Password) ? "(none)" : "****");
     Log.Information("Observability severity: {Severity}", observabilityOptions.MinimumSeverity);
 
-    var server = new RelayServer(config.Port, password: config.Password, observabilityOptions: observabilityOptions);
+    var server = new RelayServer(
+        config.Port,
+        password: config.Password,
+        identityOptions: identityOptions,
+        observabilityOptions: observabilityOptions);
     _ = server.RunAsync(cts.Token);
 
     await ClientLauncher.RunAsync("localhost", config.Port, "", name, gameApi, cts.Token);

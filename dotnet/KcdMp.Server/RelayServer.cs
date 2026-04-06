@@ -1,6 +1,8 @@
 using System.Net;
 using System.Net.Sockets;
+using KcdMp.Server.Identity;
 using KcdMp.Server.Observability;
+using KcdMp.Server.Persistence;
 using KcdMp.Server.Sessions;
 using KcdMp.Shared.Protocol;
 using Serilog;
@@ -13,6 +15,7 @@ public class RelayServer
     private readonly List<ClientSession> _clients = [];
     private readonly List<Task> _sessionTasks = [];
     private readonly ServerSessionBackend _sessionBackend;
+    private readonly IPlayerIdentityService _identityService;
     private readonly Dictionary<Guid, ClientSession> _clientsBySessionId = [];
     private readonly object _lock = new();
     private readonly ILogger _logger;
@@ -23,9 +26,13 @@ public class RelayServer
         bool echo = false,
         string password = "",
         TimeSpan? sessionIdleTimeout = null,
+        JsonPersistenceOptions? persistenceOptions = null,
+        PlayerIdentityOptions? identityOptions = null,
         ILogger? logger = null,
         IServerObservabilitySink? observability = null,
-        ServerObservabilityOptions? observabilityOptions = null)
+        ServerObservabilityOptions? observabilityOptions = null,
+        IJsonPersistenceStore? persistenceStore = null,
+        IPlayerIdentityService? identityService = null)
     {
         _port = port;
         Echo = echo;
@@ -34,6 +41,8 @@ public class RelayServer
         _sessionBackend = new ServerSessionBackend(sessionIdleTimeout);
         _sessionBackend.LifecycleEventEmitted += HandleSessionLifecycleEvent;
         _observability = observability ?? new SerilogServerObservabilitySink(_logger, observabilityOptions);
+        var store = persistenceStore ?? new JsonFilePersistenceStore(persistenceOptions, _logger, _observability);
+        _identityService = identityService ?? new PlayerIdentityService(store, _observability, identityOptions, _logger);
     }
 
     public bool Echo { get; }
@@ -235,6 +244,33 @@ public class RelayServer
 
     internal void MarkAuthenticationRejected(Guid sessionId)
         => _sessionBackend.MarkAuthenticationRejected(sessionId);
+
+    internal async Task<(bool Allowed, string? Reason, string? IdentityId)> ResolveAndAssociateIdentityAsync(
+        Guid sessionId,
+        PlayerIdentityClaim claim,
+        CancellationToken ct = default)
+    {
+        var resolved = await _identityService.ResolveOrCreateAsync(claim, ct);
+        if (!resolved.IsAllowed || resolved.Identity is null)
+            return (false, resolved.DenialReason ?? "Identity denied.", null);
+
+        if (!_sessionBackend.TryAssociateIdentity(sessionId, resolved.Identity.InternalId))
+        {
+            Emit(
+                ServerObservableEventType.IdentityAccessDenied,
+                ServerObservableComponent.Session,
+                ServerObservableSeverity.Warning,
+                "Identity already has an active session.",
+                sessionId,
+                payload: new Dictionary<string, object?>
+                {
+                    ["identity_id"] = resolved.Identity.InternalId,
+                });
+            return (false, "Identity already connected.", resolved.Identity.InternalId);
+        }
+
+        return (true, null, resolved.Identity.InternalId);
+    }
 
     internal void EmitBackendError(Guid? sessionId, string message, Exception? ex = null)
     {
