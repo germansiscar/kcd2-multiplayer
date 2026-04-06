@@ -6,19 +6,19 @@ namespace KcdMp.Server.Persistence;
 
 public sealed class JsonFilePersistenceStore : IJsonPersistenceStore
 {
-    private static readonly char[] InvalidPathChars = Path.GetInvalidFileNameChars();
-
-    private readonly JsonPersistenceOptions _options;
+    private readonly JsonServerStorageLayout _layout;
     private readonly ILogger _logger;
     private readonly JsonSerializerOptions _json;
 
     public JsonFilePersistenceStore(JsonPersistenceOptions? options = null, ILogger? logger = null)
     {
-        _options = options ?? new JsonPersistenceOptions();
+        var persistenceOptions = options ?? new JsonPersistenceOptions();
+        _layout = new JsonServerStorageLayout(persistenceOptions);
+        _layout.EnsureInitialized();
         _logger = logger ?? Log.Logger;
         _json = new JsonSerializerOptions
         {
-            WriteIndented = _options.Environment == JsonPersistenceEnvironment.Development,
+            WriteIndented = persistenceOptions.Environment == JsonPersistenceEnvironment.Development,
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
             DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         };
@@ -122,23 +122,6 @@ public sealed class JsonFilePersistenceStore : IJsonPersistenceStore
 
     private string BuildPath(string domain, string internalId)
     {
-        ValidatePathPart(domain, nameof(domain));
-        ValidatePathPart(internalId, nameof(internalId));
-
-        return Path.Combine(_options.BasePath, domain, $"{internalId}.json");
-    }
-
-    private static void ValidatePathPart(string value, string paramName)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-            throw new ArgumentException("Value cannot be empty.", paramName);
-
-        if (value.Contains("..", StringComparison.Ordinal) ||
-            value.Contains(Path.DirectorySeparatorChar) ||
-            value.Contains(Path.AltDirectorySeparatorChar) ||
-            value.IndexOfAny(InvalidPathChars) >= 0)
-        {
-            throw new ArgumentException("Value contains invalid path characters.", paramName);
-        }
+        return _layout.GetEntityPath(domain, internalId);
     }
 }
