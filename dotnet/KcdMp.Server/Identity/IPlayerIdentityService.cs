@@ -1,8 +1,13 @@
+using KcdMp.Server.AccessControl;
+
 namespace KcdMp.Server.Identity;
 
 public interface IPlayerIdentityService
 {
-    Task<PlayerIdentityResolution> ResolveOrCreateAsync(PlayerIdentityClaim claim, CancellationToken ct = default);
+    Task<PlayerIdentityResolution> ResolveOrCreateAsync(
+        PlayerIdentityClaim claim,
+        ServerAccessMode accessMode = ServerAccessMode.Open,
+        CancellationToken ct = default);
 
     Task<PlayerIdentityRecord?> GetByInternalIdAsync(string internalId, CancellationToken ct = default);
 

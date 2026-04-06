@@ -21,6 +21,7 @@ public class KcdmpConfig
     public string PersistentToken { get; set; } = "";
     public string SteamId { get; set; } = "";
     public string CharacterId { get; set; } = "";
+    public string ServerAccessMode { get; set; } = "Open";
     public bool IdentityRequireWhitelist { get; set; } = false;
     public bool CharacterRequireOnConnect { get; set; } = false;
     public long CurrencyInitialBalance { get; set; } = 0;

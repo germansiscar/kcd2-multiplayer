@@ -1,3 +1,4 @@
+using KcdMp.Server.AccessControl;
 using System.Security.Cryptography;
 using System.Text;
 using KcdMp.Server.Observability;
@@ -28,7 +29,10 @@ public sealed class PlayerIdentityService : IPlayerIdentityService
         _logger = logger ?? Log.Logger;
     }
 
-    public async Task<PlayerIdentityResolution> ResolveOrCreateAsync(PlayerIdentityClaim claim, CancellationToken ct = default)
+    public async Task<PlayerIdentityResolution> ResolveOrCreateAsync(
+        PlayerIdentityClaim claim,
+        ServerAccessMode accessMode = ServerAccessMode.Open,
+        CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(claim);
         if (string.IsNullOrWhiteSpace(claim.DisplayName))
@@ -71,7 +75,7 @@ public sealed class PlayerIdentityService : IPlayerIdentityService
                         IdentificationKind: kind);
                 }
 
-                identity = CreateNewIdentity(claim.DisplayName.Trim(), kind, externalLookupKey, now);
+                identity = CreateNewIdentity(claim.DisplayName.Trim(), kind, externalLookupKey, accessMode, now);
                 await _store.SaveAsync(JsonPersistenceDomains.Identity, identity.InternalId, identity, ct);
                 index.ExternalKeyToInternalId[externalLookupKey] = identity.InternalId;
                 index.UpdatedAtUtc = now;
@@ -95,49 +99,6 @@ public sealed class PlayerIdentityService : IPlayerIdentityService
                 identity.LastSeenAtUtc = now;
                 identity.UpdatedAtUtc = now;
                 await _store.SaveAsync(JsonPersistenceDomains.Identity, identity.InternalId, identity, ct);
-            }
-
-            if (identity.IsDeactivated || identity.Status == PlayerIdentityStatus.Blocked)
-            {
-                Emit(
-                    ServerObservableEventType.IdentityAccessDenied,
-                    ServerObservableSeverity.Warning,
-                    "Blocked identity denied.",
-                    identityId: identity.InternalId,
-                    payload: new Dictionary<string, object?>
-                    {
-                        ["status"] = identity.Status.ToString(),
-                        ["is_deactivated"] = identity.IsDeactivated,
-                        ["identification_kind"] = kind.ToString(),
-                    });
-
-                return new PlayerIdentityResolution(
-                    IsAllowed: false,
-                    DenialReason: "Identity is blocked.",
-                    Created: created,
-                    Identity: identity,
-                    IdentificationKind: kind);
-            }
-
-            if (_options.RequireWhitelistForPendingIdentity && identity.Status == PlayerIdentityStatus.Pending)
-            {
-                Emit(
-                    ServerObservableEventType.IdentityAccessDenied,
-                    ServerObservableSeverity.Warning,
-                    "Pending identity denied by whitelist policy.",
-                    identityId: identity.InternalId,
-                    payload: new Dictionary<string, object?>
-                    {
-                        ["status"] = identity.Status.ToString(),
-                        ["identification_kind"] = kind.ToString(),
-                    });
-
-                return new PlayerIdentityResolution(
-                    IsAllowed: false,
-                    DenialReason: "Identity is pending approval.",
-                    Created: created,
-                    Identity: identity,
-                    IdentificationKind: kind);
             }
 
             Emit(
@@ -276,11 +237,12 @@ public sealed class PlayerIdentityService : IPlayerIdentityService
         string displayName,
         PlayerIdentityExternalKind kind,
         string externalLookupKey,
+        ServerAccessMode accessMode,
         DateTimeOffset now)
     {
-        var status = _options.RequireWhitelistForPendingIdentity
-            ? _options.NewIdentityStatusWhenWhitelistEnabled
-            : _options.NewIdentityStatusWhenWhitelistDisabled;
+        var status = accessMode == ServerAccessMode.Whitelist
+            ? _options.NewIdentityStatusWhenWhitelistMode
+            : _options.NewIdentityStatusWhenOpenMode;
 
         return new PlayerIdentityRecord
         {

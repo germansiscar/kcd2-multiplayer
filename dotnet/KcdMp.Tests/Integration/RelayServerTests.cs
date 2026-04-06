@@ -1,4 +1,5 @@
 using System.Net.Sockets;
+using KcdMp.Server.AccessControl;
 using KcdMp.Server.Characters;
 using KcdMp.Server.Identity;
 using KcdMp.Server.Persistence;
@@ -258,6 +259,108 @@ public class RelayServerTests : IAsyncLifetime
 
             Assert.Equal(PacketType.AuthResult, rejected.Type);
             Assert.False(PacketReader.ParseAuthResult(rejected.Payload).ok);
+        }
+        finally
+        {
+            cts.Cancel();
+            try { await task; } catch { }
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Client_NewIdentityInWhitelistMode_IsRejectedAndPersistedAsPending()
+    {
+        const int port = TestPort + 4;
+        var root = Path.Combine(Path.GetTempPath(), $"kcdmp_relay_access_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        using var cts = new CancellationTokenSource();
+
+        var store = new JsonFilePersistenceStore(new JsonPersistenceOptions { BasePath = root });
+        var identities = new PlayerIdentityService(store, new NullServerObservabilitySink());
+        var server = new KcdMp.Server.RelayServer(
+            port,
+            password: TestPassword,
+            persistenceStore: store,
+            identityService: identities,
+            accessControlOptions: new ServerAccessControlOptions
+            {
+                DefaultAccessMode = ServerAccessMode.Whitelist,
+            });
+        var task = server.RunAsync(cts.Token);
+        await Task.Delay(200);
+
+        try
+        {
+            using var tcp = new TcpClient();
+            await tcp.ConnectAsync("127.0.0.1", port);
+            var stream = tcp.GetStream();
+
+            await stream.WriteAsync(PacketWriter.Auth(TestPassword));
+            var authResponse = await stream.ReadPacketAsync();
+            Assert.True(PacketReader.ParseAuthResult(authResponse.Payload).ok);
+
+            await stream.WriteAsync(PacketWriter.Handshake("WhitelistNewPlayer"));
+            var rejected = await stream.ReadPacketAsync();
+
+            Assert.Equal(PacketType.AuthResult, rejected.Type);
+            var (ok, _) = PacketReader.ParseAuthResult(rejected.Payload);
+            Assert.False(ok);
+
+            var allIdentities = await identities.ListAllAsync();
+            var created = Assert.Single(allIdentities);
+            Assert.Equal(PlayerIdentityStatus.Pending, created.Status);
+        }
+        finally
+        {
+            cts.Cancel();
+            try { await task; } catch { }
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Client_PendingIdentityInOpenMode_IsAllowed()
+    {
+        const int port = TestPort + 5;
+        var root = Path.Combine(Path.GetTempPath(), $"kcdmp_relay_access_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        using var cts = new CancellationTokenSource();
+
+        var store = new JsonFilePersistenceStore(new JsonPersistenceOptions { BasePath = root });
+        var identities = new PlayerIdentityService(store, new NullServerObservabilitySink());
+        var created = await identities.ResolveOrCreateAsync(
+            new PlayerIdentityClaim("PendingPlayer", "pending_token", null),
+            ServerAccessMode.Whitelist);
+        Assert.NotNull(created.Identity);
+        Assert.Equal(PlayerIdentityStatus.Pending, created.Identity!.Status);
+
+        var server = new KcdMp.Server.RelayServer(
+            port,
+            password: TestPassword,
+            persistenceStore: store,
+            identityService: identities,
+            accessControlOptions: new ServerAccessControlOptions
+            {
+                DefaultAccessMode = ServerAccessMode.Open,
+            });
+        var task = server.RunAsync(cts.Token);
+        await Task.Delay(200);
+
+        try
+        {
+            using var tcp = new TcpClient();
+            await tcp.ConnectAsync("127.0.0.1", port);
+            var stream = tcp.GetStream();
+
+            await stream.WriteAsync(PacketWriter.Auth(TestPassword));
+            var authResponse = await stream.ReadPacketAsync();
+            Assert.True(PacketReader.ParseAuthResult(authResponse.Payload).ok);
+
+            var handshake = """{"displayName":"PendingPlayer","persistentToken":"pending_token"}""";
+            await stream.WriteAsync(PacketWriter.Handshake(handshake));
+            var packet = await stream.ReadPacketAsync();
+            Assert.Equal(PacketType.Ack, packet.Type);
         }
         finally
         {

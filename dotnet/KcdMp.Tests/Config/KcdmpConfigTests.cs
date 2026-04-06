@@ -18,6 +18,7 @@ public class KcdmpConfigTests
         Assert.Equal("", config.PersistentToken);
         Assert.Equal("", config.SteamId);
         Assert.Equal("", config.CharacterId);
+        Assert.Equal("Open", config.ServerAccessMode);
         Assert.False(config.CharacterRequireOnConnect);
         Assert.Equal(0, config.CurrencyInitialBalance);
         Assert.Equal(1, config.CurrencySaveRetryCount);
@@ -41,6 +42,7 @@ public class KcdmpConfigTests
             PersistentToken = "token_a",
             SteamId = "steam_1",
             CharacterId = "cid_123",
+            ServerAccessMode = "Whitelist",
             CharacterRequireOnConnect = true,
             CurrencyInitialBalance = 250,
             CurrencySaveRetryCount = 3,
@@ -60,6 +62,7 @@ public class KcdmpConfigTests
         Assert.Equal("token_a", loaded.PersistentToken);
         Assert.Equal("steam_1", loaded.SteamId);
         Assert.Equal("cid_123", loaded.CharacterId);
+        Assert.Equal("Whitelist", loaded.ServerAccessMode);
         Assert.True(loaded.CharacterRequireOnConnect);
         Assert.Equal(250, loaded.CurrencyInitialBalance);
         Assert.Equal(3, loaded.CurrencySaveRetryCount);

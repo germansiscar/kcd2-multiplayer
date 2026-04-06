@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using KcdMp.Server.AccessControl;
 using KcdMp.Server.Characters;
 using KcdMp.Server.Currency;
 using KcdMp.Server.Identity;
@@ -20,6 +21,7 @@ public class RelayServer
     private readonly List<ClientSession> _clients = [];
     private readonly List<Task> _sessionTasks = [];
     private readonly ServerSessionBackend _sessionBackend;
+    private readonly IServerAccessControlService _accessControlService;
     private readonly IPlayerIdentityService _identityService;
     private readonly ICharacterProfileService _characterProfileService;
     private readonly ICharacterSessionBindingService _characterBindingService;
@@ -39,6 +41,7 @@ public class RelayServer
         string password = "",
         TimeSpan? sessionIdleTimeout = null,
         JsonPersistenceOptions? persistenceOptions = null,
+        ServerAccessControlOptions? accessControlOptions = null,
         PlayerIdentityOptions? identityOptions = null,
         CharacterSessionBindingOptions? characterBindingOptions = null,
         CharacterLifecycleOptions? characterLifecycleOptions = null,
@@ -50,6 +53,7 @@ public class RelayServer
         IServerObservabilitySink? observability = null,
         ServerObservabilityOptions? observabilityOptions = null,
         IJsonPersistenceStore? persistenceStore = null,
+        IServerAccessControlService? accessControlService = null,
         IPlayerIdentityService? identityService = null,
         ICharacterProfileService? characterProfileService = null,
         ICharacterSessionBindingService? characterBindingService = null,
@@ -67,6 +71,7 @@ public class RelayServer
         _sessionBackend.LifecycleEventEmitted += HandleSessionLifecycleEvent;
         _observability = observability ?? new SerilogServerObservabilitySink(_logger, observabilityOptions);
         var store = persistenceStore ?? new JsonFilePersistenceStore(persistenceOptions, _logger, _observability);
+        _accessControlService = accessControlService ?? new ServerAccessControlService(store, _observability, accessControlOptions, _logger);
         _identityService = identityService ?? new PlayerIdentityService(store, _observability, identityOptions, _logger);
         _characterProfileService = characterProfileService ?? new CharacterProfileService(store, _identityService, _observability, _logger);
         if (characterBindingService is not null)
@@ -121,6 +126,7 @@ public class RelayServer
 
     public async Task RunAsync(CancellationToken ct = default)
     {
+        await _accessControlService.GetActiveConfigurationAsync(ct);
         await _inventoryRulesService.GetActiveConfigurationAsync(ct);
         var listener = new TcpListener(IPAddress.Any, _port);
         listener.Start();
@@ -328,22 +334,25 @@ public class RelayServer
         string? preferredCharacterId,
         CancellationToken ct = default)
     {
-        var resolved = await _identityService.ResolveOrCreateAsync(claim, ct);
+        var accessConfig = await _accessControlService.GetActiveConfigurationAsync(ct);
+        var resolved = await _identityService.ResolveOrCreateAsync(claim, accessConfig.AccessMode, ct);
         if (!resolved.IsAllowed || resolved.Identity is null)
-            return (false, resolved.DenialReason ?? "Identity denied.", null);
+            return (false, resolved.DenialReason ?? "Identity resolution failed.", null);
+
+        var accessDecision = await _accessControlService.EvaluateIdentityAccessAsync(
+            new ServerAccessIdentityEvaluationRequest(
+                SessionId: sessionId,
+                IdentityId: resolved.Identity.InternalId,
+                IdentityStatus: resolved.Identity.Status,
+                IsDeactivated: resolved.Identity.IsDeactivated,
+                IdentityCreatedInThisAttempt: resolved.Created),
+            ct);
+        if (!accessDecision.IsAllowed)
+            return (false, accessDecision.DenialReason ?? "Identity denied by access policy.", resolved.Identity.InternalId);
 
         if (!_sessionBackend.TryAssociateIdentity(sessionId, resolved.Identity.InternalId))
         {
-            Emit(
-                ServerObservableEventType.IdentityAccessDenied,
-                ServerObservableComponent.Session,
-                ServerObservableSeverity.Warning,
-                "Identity already has an active session.",
-                sessionId,
-                payload: new Dictionary<string, object?>
-                {
-                    ["identity_id"] = resolved.Identity.InternalId,
-                });
+            _accessControlService.EmitDuplicateActiveSessionDenied(sessionId, resolved.Identity.InternalId);
             return (false, "Identity already connected.", resolved.Identity.InternalId);
         }
 

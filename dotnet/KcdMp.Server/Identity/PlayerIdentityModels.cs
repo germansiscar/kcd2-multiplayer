@@ -1,3 +1,4 @@
+using KcdMp.Server.AccessControl;
 using System.Text.Json.Serialization;
 
 namespace KcdMp.Server.Identity;
@@ -46,9 +47,8 @@ public sealed record PlayerIdentityClaim(
 public sealed class PlayerIdentityOptions
 {
     public bool AutoCreateWhenMissing { get; init; } = true;
-    public bool RequireWhitelistForPendingIdentity { get; init; } = false;
-    public PlayerIdentityStatus NewIdentityStatusWhenWhitelistDisabled { get; init; } = PlayerIdentityStatus.Active;
-    public PlayerIdentityStatus NewIdentityStatusWhenWhitelistEnabled { get; init; } = PlayerIdentityStatus.Pending;
+    public PlayerIdentityStatus NewIdentityStatusWhenOpenMode { get; init; } = PlayerIdentityStatus.Active;
+    public PlayerIdentityStatus NewIdentityStatusWhenWhitelistMode { get; init; } = PlayerIdentityStatus.Pending;
 }
 
 public sealed record PlayerIdentityResolution(

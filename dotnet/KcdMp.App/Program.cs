@@ -1,4 +1,5 @@
 using KcdMp.Client;
+using KcdMp.Server.AccessControl;
 using KcdMp.Server.Characters;
 using KcdMp.Server.Currency;
 using KcdMp.Server.Identity;
@@ -41,9 +42,13 @@ var observabilityOptions = new ServerObservabilityOptions
     MinimumSeverity = ParseObservabilitySeverity(config.ObservabilityMinSeverity),
     IncludeSyncMicroEvents = config.ObservabilityIncludeSyncMicroEvents,
 };
+var accessMode = ResolveAccessMode(config.ServerAccessMode, config.IdentityRequireWhitelist);
+var accessControlOptions = new ServerAccessControlOptions
+{
+    DefaultAccessMode = accessMode,
+};
 var identityOptions = new PlayerIdentityOptions
 {
-    RequireWhitelistForPendingIdentity = config.IdentityRequireWhitelist,
 };
 var characterBindingOptions = new CharacterSessionBindingOptions
 {
@@ -68,6 +73,7 @@ if (config.Mode == "host")
 {
     Log.Information("Port    : {Port}", config.Port);
     Log.Information("Password: {Password}", string.IsNullOrEmpty(config.Password) ? "(none)" : "****");
+    Log.Information("Access mode (bootstrap default): {Mode}", accessMode);
     Log.Information("Observability severity: {Severity}", observabilityOptions.MinimumSeverity);
     Log.Information("Currency initial balance: {Balance}", currencyOptions.InitialBalance);
     Log.Information("Respawn unconscious duration (s): {Duration}", respawnOptions.UnconsciousDuration.TotalSeconds);
@@ -75,6 +81,7 @@ if (config.Mode == "host")
     var server = new RelayServer(
         config.Port,
         password: config.Password,
+        accessControlOptions: accessControlOptions,
         identityOptions: identityOptions,
         characterBindingOptions: characterBindingOptions,
         characterCurrencyOptions: currencyOptions,
@@ -130,5 +137,13 @@ static ServerObservableSeverity ParseObservabilitySeverity(string configuredLeve
         return parsed;
 
     return ServerObservableSeverity.Information;
+}
+
+static ServerAccessMode ResolveAccessMode(string configuredMode, bool legacyWhitelistFlag)
+{
+    if (Enum.TryParse(configuredMode, ignoreCase: true, out ServerAccessMode parsed))
+        return parsed;
+
+    return legacyWhitelistFlag ? ServerAccessMode.Whitelist : ServerAccessMode.Open;
 }
 
