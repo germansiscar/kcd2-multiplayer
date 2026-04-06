@@ -33,6 +33,21 @@ public sealed class JsonFilePersistenceStoreTests
     }
 
     [Fact]
+    public void Constructor_CreatesRootAndCanonicalDomainDirectories()
+    {
+        var root = CreateTempDir();
+        try
+        {
+            _ = CreateStore(root, JsonPersistenceEnvironment.Development);
+
+            Assert.True(Directory.Exists(root));
+            foreach (var domain in JsonPersistenceDomains.Default)
+                Assert.True(Directory.Exists(Path.Combine(root, domain)), $"Expected domain folder '{domain}'.");
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
     public async Task DevelopmentMode_WritesIndentedJson()
     {
         var root = CreateTempDir();
@@ -58,6 +73,22 @@ public sealed class JsonFilePersistenceStoreTests
 
             var raw = await File.ReadAllTextAsync(Path.Combine(root, "characters", "char_002.json"));
             Assert.DoesNotContain(Environment.NewLine, raw);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public async Task Save_AllowsAddingNewDomainWithoutReorganizingExistingOnes()
+    {
+        var root = CreateTempDir();
+        try
+        {
+            var store = CreateStore(root, JsonPersistenceEnvironment.Development);
+            await store.SaveAsync("jobs", "job_001", new PlayerRecord { InternalId = "job_001", Name = "Blacksmith" });
+
+            Assert.True(File.Exists(Path.Combine(root, "jobs", "job_001.json")));
+            Assert.True(Directory.Exists(Path.Combine(root, JsonPersistenceDomains.Config)));
+            Assert.True(Directory.Exists(Path.Combine(root, JsonPersistenceDomains.Audit)));
         }
         finally { Directory.Delete(root, recursive: true); }
     }
