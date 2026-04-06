@@ -95,8 +95,11 @@ public class ClientSession
                 return;
             }
             var handshakePayload = PacketReader.ReadUtf8(hsPacket.Payload, 0, hsPacket.Payload.Length);
-            var claim = ParseIdentityClaim(handshakePayload);
-            var (allowed, reason, identityId) = await _server.ResolveAndAssociateIdentityAsync(SessionId, claim);
+            var joinClaim = ParseSessionJoinClaim(handshakePayload);
+            var (allowed, reason, identityId) = await _server.ResolveAndAssociateIdentityAsync(
+                SessionId,
+                joinClaim.IdentityClaim,
+                joinClaim.PreferredCharacterId);
             if (!allowed)
             {
                 _server.MarkAuthenticationRejected(SessionId);
@@ -106,7 +109,7 @@ public class ClientSession
                 return;
             }
 
-            Name = claim.DisplayName;
+            Name = joinClaim.IdentityClaim.DisplayName;
 
             _logger.Information("[+] '{Name}' connected (id={Id}) from {RemoteEndPoint}. Clients: active",
                 Name, Id, _tcp.Client.RemoteEndPoint);
@@ -205,14 +208,14 @@ public class ClientSession
         }
     }
 
-    private static PlayerIdentityClaim ParseIdentityClaim(string handshakePayload)
+    private static SessionJoinClaim ParseSessionJoinClaim(string handshakePayload)
     {
         if (string.IsNullOrWhiteSpace(handshakePayload))
-            return new PlayerIdentityClaim("Unknown", null, null);
+            return new SessionJoinClaim(new PlayerIdentityClaim("Unknown", null, null), null);
 
         var trimmed = handshakePayload.Trim();
         if (!trimmed.StartsWith('{'))
-            return new PlayerIdentityClaim(trimmed, null, null);
+            return new SessionJoinClaim(new PlayerIdentityClaim(trimmed, null, null), null);
 
         try
         {
@@ -225,13 +228,17 @@ public class ClientSession
             string? persistentToken = ReadOptionalString(root, "persistentToken")
                                       ?? ReadOptionalString(root, "token");
             string? steamId = ReadOptionalString(root, "steamId");
+            string? characterId = ReadOptionalString(root, "characterId")
+                                  ?? ReadOptionalString(root, "activeCharacterId");
 
             var normalizedName = string.IsNullOrWhiteSpace(displayName) ? "Unknown" : displayName.Trim();
-            return new PlayerIdentityClaim(normalizedName, persistentToken?.Trim(), steamId?.Trim());
+            return new SessionJoinClaim(
+                new PlayerIdentityClaim(normalizedName, persistentToken?.Trim(), steamId?.Trim()),
+                characterId?.Trim());
         }
         catch
         {
-            return new PlayerIdentityClaim(trimmed, null, null);
+            return new SessionJoinClaim(new PlayerIdentityClaim(trimmed, null, null), null);
         }
     }
 
@@ -246,5 +253,7 @@ public class ClientSession
         var value = node.GetString();
         return string.IsNullOrWhiteSpace(value) ? null : value;
     }
+
+    private sealed record SessionJoinClaim(PlayerIdentityClaim IdentityClaim, string? PreferredCharacterId);
 
 }
