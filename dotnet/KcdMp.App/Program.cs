@@ -4,6 +4,7 @@ using KcdMp.Server.Currency;
 using KcdMp.Server.Identity;
 using KcdMp.Server;
 using KcdMp.Server.Observability;
+using KcdMp.Server.Respawn;
 using KcdMp.Shared.Config;
 using Serilog;
 using Serilog.Events;
@@ -54,6 +55,14 @@ var currencyOptions = new CharacterCurrencyOptions
     SaveRetryCount = config.CurrencySaveRetryCount,
     SaveRetryDelay = TimeSpan.FromMilliseconds(Math.Max(0, config.CurrencySaveRetryDelayMs)),
 };
+var respawnOptions = new CharacterRespawnOptions
+{
+    UnconsciousDuration = TimeSpan.FromSeconds(Math.Max(1, config.RespawnUnconsciousDurationSeconds)),
+    DefaultRespawnPolicyId = string.IsNullOrWhiteSpace(config.RespawnDefaultPolicyId) ? "default" : config.RespawnDefaultPolicyId.Trim(),
+    DefaultRespawnPointId = string.IsNullOrWhiteSpace(config.RespawnDefaultPointId) ? "default_spawn" : config.RespawnDefaultPointId.Trim(),
+    SaveRetryCount = config.RespawnSaveRetryCount,
+    SaveRetryDelay = TimeSpan.FromMilliseconds(Math.Max(0, config.RespawnSaveRetryDelayMs)),
+};
 
 if (config.Mode == "host")
 {
@@ -61,6 +70,7 @@ if (config.Mode == "host")
     Log.Information("Password: {Password}", string.IsNullOrEmpty(config.Password) ? "(none)" : "****");
     Log.Information("Observability severity: {Severity}", observabilityOptions.MinimumSeverity);
     Log.Information("Currency initial balance: {Balance}", currencyOptions.InitialBalance);
+    Log.Information("Respawn unconscious duration (s): {Duration}", respawnOptions.UnconsciousDuration.TotalSeconds);
 
     var server = new RelayServer(
         config.Port,
@@ -68,6 +78,7 @@ if (config.Mode == "host")
         identityOptions: identityOptions,
         characterBindingOptions: characterBindingOptions,
         characterCurrencyOptions: currencyOptions,
+        characterRespawnOptions: respawnOptions,
         observabilityOptions: observabilityOptions);
     _ = server.RunAsync(cts.Token);
 

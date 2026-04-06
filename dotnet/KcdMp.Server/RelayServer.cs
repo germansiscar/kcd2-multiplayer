@@ -6,6 +6,7 @@ using KcdMp.Server.Identity;
 using KcdMp.Server.Inventory;
 using KcdMp.Server.Observability;
 using KcdMp.Server.Persistence;
+using KcdMp.Server.Respawn;
 using KcdMp.Server.Sessions;
 using KcdMp.Shared.Protocol;
 using Serilog;
@@ -24,6 +25,7 @@ public class RelayServer
     private readonly ICharacterLifecycleService _characterLifecycleService;
     private readonly ICharacterInventoryService _characterInventoryService;
     private readonly ICharacterCurrencyService _characterCurrencyService;
+    private readonly ICharacterRespawnService _characterRespawnService;
     private readonly Dictionary<Guid, ClientSession> _clientsBySessionId = [];
     private readonly object _lock = new();
     private readonly ILogger _logger;
@@ -40,6 +42,7 @@ public class RelayServer
         CharacterLifecycleOptions? characterLifecycleOptions = null,
         CharacterInventoryOptions? characterInventoryOptions = null,
         CharacterCurrencyOptions? characterCurrencyOptions = null,
+        CharacterRespawnOptions? characterRespawnOptions = null,
         ILogger? logger = null,
         IServerObservabilitySink? observability = null,
         ServerObservabilityOptions? observabilityOptions = null,
@@ -49,7 +52,8 @@ public class RelayServer
         ICharacterSessionBindingService? characterBindingService = null,
         ICharacterLifecycleService? characterLifecycleService = null,
         ICharacterInventoryService? characterInventoryService = null,
-        ICharacterCurrencyService? characterCurrencyService = null)
+        ICharacterCurrencyService? characterCurrencyService = null,
+        ICharacterRespawnService? characterRespawnService = null)
     {
         _port = port;
         Echo = echo;
@@ -93,6 +97,12 @@ public class RelayServer
                                         _observability,
                                         characterCurrencyOptions,
                                         _logger);
+        _characterRespawnService = characterRespawnService
+                                   ?? new CharacterRespawnService(
+                                       store,
+                                       _observability,
+                                       characterRespawnOptions,
+                                       logger: _logger);
     }
 
     public bool Echo { get; }
@@ -186,6 +196,7 @@ public class RelayServer
                 runningSessions = [.. _sessionTasks];
             await Task.WhenAll(runningSessions);
             await _characterCurrencyService.SaveAndUnloadAllAsync(CharacterLifecycleSaveReason.Shutdown, CancellationToken.None);
+            await _characterRespawnService.SaveAndUnloadAllAsync(CharacterLifecycleSaveReason.Shutdown, CancellationToken.None);
             await _characterInventoryService.SaveAndUnloadAllAsync(CharacterLifecycleSaveReason.Shutdown, CancellationToken.None);
             await _characterLifecycleService.SaveAndUnloadAllAsync(CharacterLifecycleSaveReason.Shutdown, CancellationToken.None);
             try { await timeoutTask; } catch (OperationCanceledException) { }
@@ -447,6 +458,41 @@ public class RelayServer
                     });
                 return (false, currencyLoad.DenialReason ?? "Currency load failed.", resolved.Identity.InternalId);
             }
+
+            var respawnLoad = await _characterRespawnService.LoadForSessionAsync(
+                sessionId,
+                resolved.Identity.InternalId,
+                binding.CharacterId!,
+                ct);
+            if (!respawnLoad.Loaded)
+            {
+                await _characterCurrencyService.SaveAndUnloadSessionAsync(
+                    sessionId,
+                    CharacterLifecycleSaveReason.SessionClosed,
+                    ct);
+                await _characterInventoryService.SaveAndUnloadSessionAsync(
+                    sessionId,
+                    CharacterLifecycleSaveReason.SessionClosed,
+                    ct);
+                await _characterLifecycleService.SaveAndUnloadSessionAsync(
+                    sessionId,
+                    CharacterLifecycleSaveReason.SessionClosed,
+                    ct);
+                _sessionBackend.ClearIdentityAssociation(sessionId);
+                Emit(
+                    ServerObservableEventType.RespawnLoadFailed,
+                    ServerObservableComponent.Session,
+                    ServerObservableSeverity.Warning,
+                    "Respawn lifecycle load failed while preparing session.",
+                    sessionId,
+                    payload: new Dictionary<string, object?>
+                    {
+                        ["identity_id"] = resolved.Identity.InternalId,
+                        ["character_id"] = binding.CharacterId,
+                        ["reason"] = respawnLoad.DenialReason,
+                    });
+                return (false, respawnLoad.DenialReason ?? "Respawn lifecycle load failed.", resolved.Identity.InternalId);
+            }
         }
 
         _sessionBackend.SetCharacterReference(sessionId, binding.CharacterId);
@@ -462,6 +508,24 @@ public class RelayServer
             ServerSessionCloseReason.Shutdown => CharacterLifecycleSaveReason.Shutdown,
             _ => CharacterLifecycleSaveReason.SessionClosed,
         };
+
+        try
+        {
+            _characterRespawnService
+                .SaveAndUnloadSessionAsync(sessionId, saveReason)
+                .GetAwaiter()
+                .GetResult();
+        }
+        catch (Exception ex)
+        {
+            Emit(
+                ServerObservableEventType.RespawnSaveFailed,
+                ServerObservableComponent.Persistence,
+                ServerObservableSeverity.Error,
+                "Respawn lifecycle save on session close failed.",
+                sessionId,
+                payload: new Dictionary<string, object?> { ["exception"] = ex.Message });
+        }
 
         try
         {

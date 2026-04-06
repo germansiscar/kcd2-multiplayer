@@ -63,6 +63,19 @@ public enum ServerObservableEventType
     CurrencySaveFailed = 40,
     CurrencyChanged = 41,
     CurrencyValidationFailed = 42,
+    RespawnLoadStarted = 43,
+    RespawnLoadCompleted = 44,
+    RespawnLoadFailed = 45,
+    RespawnSaveStarted = 46,
+    RespawnSaveCompleted = 47,
+    RespawnSaveFailed = 48,
+    DefeatDetected = 49,
+    UnconsciousEntered = 50,
+    HealerRecoveryApplied = 51,
+    UnconsciousExpired = 52,
+    UnconsciousCancelled = 53,
+    RespawnApplied = 54,
+    RespawnApplyFailed = 55,
 }
 
 public sealed record ServerObservableEvent(
