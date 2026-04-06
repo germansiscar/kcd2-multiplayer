@@ -47,6 +47,14 @@ public enum ServerObservableEventType
     CharacterSaveStarted = 24,
     CharacterSaveCompleted = 25,
     CharacterSaveFailed = 26,
+    InventoryLoadStarted = 27,
+    InventoryLoadCompleted = 28,
+    InventoryLoadFailed = 29,
+    InventorySaveStarted = 30,
+    InventorySaveCompleted = 31,
+    InventorySaveFailed = 32,
+    InventoryChanged = 33,
+    InventoryValidationFailed = 34,
 }
 
 public sealed record ServerObservableEvent(
