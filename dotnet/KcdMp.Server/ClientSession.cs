@@ -2,6 +2,7 @@ using System.Net.Sockets;
 using System.Threading.Channels;
 using Serilog;
 using KcdMp.Shared.Protocol;
+using KcdMp.Server.Sessions;
 
 namespace KcdMp.Server;
 
@@ -30,16 +31,20 @@ public class ClientSession
     private readonly RelayServer _server;
     private readonly Channel<byte[]> _writeQueue = Channel.CreateUnbounded<byte[]>();
     private readonly ILogger _logger;
+    private int _closeRequested;
 
     public byte Id { get; } = (byte)Interlocked.Increment(ref _idCounter);
+    public Guid SessionId { get; }
     public string? Name { get; private set; }
     public bool IsReady => Name is not null;
+    public ServerSessionCloseReason CloseReason { get; private set; } = ServerSessionCloseReason.NetworkDisconnect;
 
-    public ClientSession(TcpClient tcp, RelayServer server, ILogger? logger = null)
+    public ClientSession(TcpClient tcp, RelayServer server, Guid sessionId, ILogger? logger = null)
     {
         _tcp = tcp;
         _stream = tcp.GetStream();
         _server = server;
+        SessionId = sessionId;
         _logger = logger ?? Log.Logger;
     }
 
@@ -48,27 +53,40 @@ public class ClientSession
         var writeTask = WriteLoopAsync();
         try
         {
+            _server.MarkSessionActivity(SessionId);
+
             // --- Auth (if server has password) ---
             if (!string.IsNullOrEmpty(_server.Password))
             {
                 var authPacket = await _stream.ReadPacketAsync();
+                _server.MarkSessionActivity(SessionId);
                 if (authPacket.Type != PacketType.Auth)
                 {
+                    _server.MarkAuthenticationRejected(SessionId);
+                    CloseReason = ServerSessionCloseReason.AuthenticationRejected;
                     EnqueueRaw(PacketWriter.AuthResult(false, "Expected Auth packet"));
                     return;
                 }
                 string clientPassword = PacketReader.ReadUtf8(authPacket.Payload, 0, authPacket.Payload.Length);
                 if (clientPassword != _server.Password)
                 {
+                    _server.MarkAuthenticationRejected(SessionId);
+                    CloseReason = ServerSessionCloseReason.AuthenticationRejected;
                     EnqueueRaw(PacketWriter.AuthResult(false, "Wrong password"));
                     await Task.Delay(100); // let packet flush before closing
                     return;
                 }
                 EnqueueRaw(PacketWriter.AuthResult(true, "OK"));
+                _server.MarkAuthenticationAccepted(SessionId);
+            }
+            else
+            {
+                _server.MarkAuthenticationAccepted(SessionId);
             }
 
             // --- Handshake ---
             var hsPacket = await _stream.ReadPacketAsync();
+            _server.MarkSessionActivity(SessionId);
             if (hsPacket.Type != PacketType.Handshake)
             {
                 _logger.Warning("[!] Client sent bad handshake type 0x{PacketType:X2}, dropping.", (byte)hsPacket.Type);
@@ -91,6 +109,7 @@ public class ClientSession
             while (true)
             {
                 var packet = await _stream.ReadPacketAsync();
+                _server.MarkSessionActivity(SessionId);
 
                 if (packet.Type == PacketType.Ping && packet.Payload.Length == 8)
                 {
@@ -144,6 +163,19 @@ public class ClientSession
     /// <summary>Thread-safe: enqueue a raw packet to be sent to this client.</summary>
     public void EnqueueRaw(byte[] packet) =>
         _writeQueue.Writer.TryWrite(packet);
+
+    public void RequestClose(ServerSessionCloseReason reason)
+    {
+        if (Interlocked.Exchange(ref _closeRequested, 1) != 0)
+            return;
+
+        CloseReason = reason;
+
+        try { _tcp.Client.Shutdown(SocketShutdown.Both); }
+        catch { }
+        try { _tcp.Close(); }
+        catch { }
+    }
 
     private async Task WriteLoopAsync()
     {
