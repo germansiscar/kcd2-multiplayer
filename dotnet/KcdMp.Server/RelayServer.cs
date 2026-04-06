@@ -4,6 +4,7 @@ using KcdMp.Server.Characters;
 using KcdMp.Server.Currency;
 using KcdMp.Server.Identity;
 using KcdMp.Server.Inventory;
+using KcdMp.Server.InventoryRules;
 using KcdMp.Server.Observability;
 using KcdMp.Server.Persistence;
 using KcdMp.Server.Respawn;
@@ -26,6 +27,7 @@ public class RelayServer
     private readonly ICharacterInventoryService _characterInventoryService;
     private readonly ICharacterCurrencyService _characterCurrencyService;
     private readonly ICharacterRespawnService _characterRespawnService;
+    private readonly IInventoryRulesConfigurationService _inventoryRulesService;
     private readonly Dictionary<Guid, ClientSession> _clientsBySessionId = [];
     private readonly object _lock = new();
     private readonly ILogger _logger;
@@ -43,6 +45,7 @@ public class RelayServer
         CharacterInventoryOptions? characterInventoryOptions = null,
         CharacterCurrencyOptions? characterCurrencyOptions = null,
         CharacterRespawnOptions? characterRespawnOptions = null,
+        InventoryRulesOptions? inventoryRulesOptions = null,
         ILogger? logger = null,
         IServerObservabilitySink? observability = null,
         ServerObservabilityOptions? observabilityOptions = null,
@@ -53,7 +56,8 @@ public class RelayServer
         ICharacterLifecycleService? characterLifecycleService = null,
         ICharacterInventoryService? characterInventoryService = null,
         ICharacterCurrencyService? characterCurrencyService = null,
-        ICharacterRespawnService? characterRespawnService = null)
+        ICharacterRespawnService? characterRespawnService = null,
+        IInventoryRulesConfigurationService? inventoryRulesService = null)
     {
         _port = port;
         Echo = echo;
@@ -91,6 +95,12 @@ public class RelayServer
                                         _observability,
                                         characterInventoryOptions,
                                         _logger);
+        _inventoryRulesService = inventoryRulesService
+                                 ?? new InventoryRulesConfigurationService(
+                                     store,
+                                     _observability,
+                                     inventoryRulesOptions,
+                                     _logger);
         _characterCurrencyService = characterCurrencyService
                                     ?? new CharacterCurrencyService(
                                         store,
@@ -102,6 +112,7 @@ public class RelayServer
                                        store,
                                        _observability,
                                        characterRespawnOptions,
+                                       _inventoryRulesService,
                                        logger: _logger);
     }
 
@@ -110,6 +121,7 @@ public class RelayServer
 
     public async Task RunAsync(CancellationToken ct = default)
     {
+        await _inventoryRulesService.GetActiveConfigurationAsync(ct);
         var listener = new TcpListener(IPAddress.Any, _port);
         listener.Start();
         Emit(
@@ -492,6 +504,47 @@ public class RelayServer
                         ["reason"] = respawnLoad.DenialReason,
                     });
                 return (false, respawnLoad.DenialReason ?? "Respawn lifecycle load failed.", resolved.Identity.InternalId);
+            }
+
+            var ruleApply = await _inventoryRulesService.ApplyCharacterDefeatStateAsync(
+                sessionId,
+                resolved.Identity.InternalId,
+                binding.CharacterId!,
+                respawnLoad.Lifecycle?.State ?? CharacterDefeatState.Alive,
+                InventoryRuleTrigger.SessionLoad,
+                ct);
+            if (!ruleApply.Applied)
+            {
+                await _characterRespawnService.SaveAndUnloadSessionAsync(
+                    sessionId,
+                    CharacterLifecycleSaveReason.SessionClosed,
+                    ct);
+                await _characterCurrencyService.SaveAndUnloadSessionAsync(
+                    sessionId,
+                    CharacterLifecycleSaveReason.SessionClosed,
+                    ct);
+                await _characterInventoryService.SaveAndUnloadSessionAsync(
+                    sessionId,
+                    CharacterLifecycleSaveReason.SessionClosed,
+                    ct);
+                await _characterLifecycleService.SaveAndUnloadSessionAsync(
+                    sessionId,
+                    CharacterLifecycleSaveReason.SessionClosed,
+                    ct);
+                _sessionBackend.ClearIdentityAssociation(sessionId);
+                Emit(
+                    ServerObservableEventType.InventoryRuleApplyFailed,
+                    ServerObservableComponent.Session,
+                    ServerObservableSeverity.Warning,
+                    "Inventory rules could not be initialized for session.",
+                    sessionId,
+                    new Dictionary<string, object?>
+                    {
+                        ["identity_id"] = resolved.Identity.InternalId,
+                        ["character_id"] = binding.CharacterId,
+                        ["reason"] = ruleApply.DenialReason,
+                    });
+                return (false, ruleApply.DenialReason ?? "Inventory rules initialization failed.", resolved.Identity.InternalId);
             }
         }
 

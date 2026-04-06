@@ -76,6 +76,11 @@ public enum ServerObservableEventType
     UnconsciousCancelled = 53,
     RespawnApplied = 54,
     RespawnApplyFailed = 55,
+    InventoryRulesConfigLoaded = 56,
+    InventoryRulesConfigValidationFailed = 57,
+    InventoryRuleApplied = 58,
+    InventoryLootabilityChanged = 59,
+    InventoryRuleApplyFailed = 60,
 }
 
 public sealed record ServerObservableEvent(

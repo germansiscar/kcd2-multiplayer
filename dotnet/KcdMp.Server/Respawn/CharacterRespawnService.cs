@@ -1,4 +1,5 @@
 using KcdMp.Server.Characters;
+using KcdMp.Server.InventoryRules;
 using KcdMp.Server.Observability;
 using KcdMp.Server.Persistence;
 using Serilog;
@@ -11,6 +12,7 @@ public sealed class CharacterRespawnService : ICharacterRespawnService
     private readonly IServerObservabilitySink _observability;
     private readonly ICharacterRespawnApplier _respawnApplier;
     private readonly CharacterRespawnOptions _options;
+    private readonly IInventoryRulesConfigurationService _inventoryRulesService;
     private readonly ILogger _logger;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly Dictionary<Guid, LoadedRespawnContext> _loadedBySession = [];
@@ -20,12 +22,14 @@ public sealed class CharacterRespawnService : ICharacterRespawnService
         IJsonPersistenceStore store,
         IServerObservabilitySink observability,
         CharacterRespawnOptions? options = null,
+        IInventoryRulesConfigurationService? inventoryRulesService = null,
         ICharacterRespawnApplier? respawnApplier = null,
         ILogger? logger = null)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _observability = observability ?? throw new ArgumentNullException(nameof(observability));
         _options = options ?? new CharacterRespawnOptions();
+        _inventoryRulesService = inventoryRulesService ?? new NoOpInventoryRulesConfigurationService();
         _respawnApplier = respawnApplier ?? new NoOpCharacterRespawnApplier();
         _logger = logger ?? Log.Logger;
     }
@@ -279,6 +283,21 @@ public sealed class CharacterRespawnService : ICharacterRespawnService
         if (!save.Saved)
             return new CharacterRespawnActionResult(false, "Defeat state save failed.", null);
 
+        var inventoryRuleResult = await _inventoryRulesService.ApplyCharacterDefeatStateAsync(
+            sessionId,
+            loaded.IdentityId,
+            loaded.CharacterId,
+            CharacterDefeatState.Unconscious,
+            InventoryRuleTrigger.DefeatEntered,
+            ct);
+        if (!inventoryRuleResult.Applied)
+        {
+            return new CharacterRespawnActionResult(
+                false,
+                inventoryRuleResult.DenialReason ?? "Inventory rules update failed after defeat.",
+                null);
+        }
+
         var snapshot = await GetLoadedForSessionAsync(sessionId, ct);
         return new CharacterRespawnActionResult(true, null, snapshot);
     }
@@ -294,10 +313,11 @@ public sealed class CharacterRespawnService : ICharacterRespawnService
         if (!healerIsQualified)
             return new CharacterRespawnActionResult(false, "Healer role is required.", null);
 
+        LoadedRespawnContext? loaded;
         await _gate.WaitAsync(ct);
         try
         {
-            if (!_loadedBySession.TryGetValue(sessionId, out var loaded))
+            if (!_loadedBySession.TryGetValue(sessionId, out loaded))
                 return new CharacterRespawnActionResult(false, "Respawn lifecycle not loaded for this session.", null);
 
             if (loaded.Lifecycle.State != CharacterDefeatState.Unconscious)
@@ -332,6 +352,21 @@ public sealed class CharacterRespawnService : ICharacterRespawnService
         var save = await SaveForSessionAsync(sessionId, CharacterLifecycleSaveReason.DomainEvent, ct);
         if (!save.Saved)
             return new CharacterRespawnActionResult(false, "Healer recovery save failed.", null);
+
+        var inventoryRuleResult = await _inventoryRulesService.ApplyCharacterDefeatStateAsync(
+            sessionId,
+            loaded.IdentityId,
+            loaded.CharacterId,
+            CharacterDefeatState.Alive,
+            InventoryRuleTrigger.HealerRecovered,
+            ct);
+        if (!inventoryRuleResult.Applied)
+        {
+            return new CharacterRespawnActionResult(
+                false,
+                inventoryRuleResult.DenialReason ?? "Inventory rules update failed after healer recovery.",
+                null);
+        }
 
         var snapshot = await GetLoadedForSessionAsync(sessionId, ct);
         return new CharacterRespawnActionResult(true, null, snapshot);
@@ -615,6 +650,27 @@ public sealed class CharacterRespawnService : ICharacterRespawnService
         var save = await SaveForSessionAsync(sessionId, saveReason, ct);
         if (!save.Saved)
             return new CharacterRespawnActionResult(false, "Respawn lifecycle save failed.", null);
+
+        var targetDefeatState = applyResult.Applied
+            ? CharacterDefeatState.Alive
+            : CharacterDefeatState.PendingRespawn;
+        var targetTrigger = applyResult.Applied
+            ? InventoryRuleTrigger.RespawnApplied
+            : InventoryRuleTrigger.RespawnPending;
+        var inventoryRuleResult = await _inventoryRulesService.ApplyCharacterDefeatStateAsync(
+            loaded.SessionId,
+            loaded.IdentityId,
+            loaded.CharacterId,
+            targetDefeatState,
+            targetTrigger,
+            ct);
+        if (!inventoryRuleResult.Applied)
+        {
+            return new CharacterRespawnActionResult(
+                false,
+                inventoryRuleResult.DenialReason ?? "Inventory rules update failed after respawn transition.",
+                null);
+        }
 
         var snapshot = await GetLoadedForSessionAsync(sessionId, ct);
         if (applyResult.Applied)
