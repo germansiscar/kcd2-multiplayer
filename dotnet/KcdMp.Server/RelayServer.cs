@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using KcdMp.Server.Characters;
 using KcdMp.Server.Identity;
 using KcdMp.Server.Observability;
 using KcdMp.Server.Persistence;
@@ -16,6 +17,7 @@ public class RelayServer
     private readonly List<Task> _sessionTasks = [];
     private readonly ServerSessionBackend _sessionBackend;
     private readonly IPlayerIdentityService _identityService;
+    private readonly ICharacterSessionBindingService _characterBindingService;
     private readonly Dictionary<Guid, ClientSession> _clientsBySessionId = [];
     private readonly object _lock = new();
     private readonly ILogger _logger;
@@ -28,11 +30,13 @@ public class RelayServer
         TimeSpan? sessionIdleTimeout = null,
         JsonPersistenceOptions? persistenceOptions = null,
         PlayerIdentityOptions? identityOptions = null,
+        CharacterSessionBindingOptions? characterBindingOptions = null,
         ILogger? logger = null,
         IServerObservabilitySink? observability = null,
         ServerObservabilityOptions? observabilityOptions = null,
         IJsonPersistenceStore? persistenceStore = null,
-        IPlayerIdentityService? identityService = null)
+        IPlayerIdentityService? identityService = null,
+        ICharacterSessionBindingService? characterBindingService = null)
     {
         _port = port;
         Echo = echo;
@@ -43,6 +47,19 @@ public class RelayServer
         _observability = observability ?? new SerilogServerObservabilitySink(_logger, observabilityOptions);
         var store = persistenceStore ?? new JsonFilePersistenceStore(persistenceOptions, _logger, _observability);
         _identityService = identityService ?? new PlayerIdentityService(store, _observability, identityOptions, _logger);
+        if (characterBindingService is not null)
+        {
+            _characterBindingService = characterBindingService;
+        }
+        else
+        {
+            var characterService = new CharacterProfileService(store, _identityService, _observability, _logger);
+            _characterBindingService = new CharacterSessionBindingService(
+                characterService,
+                _identityService,
+                characterBindingOptions,
+                _logger);
+        }
     }
 
     public bool Echo { get; }
@@ -248,6 +265,7 @@ public class RelayServer
     internal async Task<(bool Allowed, string? Reason, string? IdentityId)> ResolveAndAssociateIdentityAsync(
         Guid sessionId,
         PlayerIdentityClaim claim,
+        string? preferredCharacterId,
         CancellationToken ct = default)
     {
         var resolved = await _identityService.ResolveOrCreateAsync(claim, ct);
@@ -269,6 +287,26 @@ public class RelayServer
             return (false, "Identity already connected.", resolved.Identity.InternalId);
         }
 
+        var binding = await _characterBindingService.BindAsync(resolved.Identity.InternalId, preferredCharacterId, ct);
+        if (!binding.IsAllowed)
+        {
+            _sessionBackend.ClearIdentityAssociation(sessionId);
+            Emit(
+                ServerObservableEventType.CharacterAccessDenied,
+                ServerObservableComponent.Session,
+                ServerObservableSeverity.Warning,
+                "Character binding denied.",
+                sessionId,
+                payload: new Dictionary<string, object?>
+                {
+                    ["identity_id"] = resolved.Identity.InternalId,
+                    ["character_id"] = preferredCharacterId,
+                    ["reason"] = binding.DenialReason,
+                });
+            return (false, binding.DenialReason ?? "Character binding denied.", resolved.Identity.InternalId);
+        }
+
+        _sessionBackend.SetCharacterReference(sessionId, binding.CharacterId);
         return (true, null, resolved.Identity.InternalId);
     }
 

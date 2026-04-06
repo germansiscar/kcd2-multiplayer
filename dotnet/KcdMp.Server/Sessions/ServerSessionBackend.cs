@@ -219,6 +219,29 @@ public sealed class ServerSessionBackend
         }
     }
 
+    public void ClearIdentityAssociation(Guid sessionId, DateTimeOffset? now = null)
+    {
+        var utcNow = now ?? DateTimeOffset.UtcNow;
+        lock (_lock)
+        {
+            if (!_sessions.TryGetValue(sessionId, out var session) || session.State == ServerSessionState.Closed)
+                return;
+
+            if (session.IdentityId is not null &&
+                _identityToSession.TryGetValue(session.IdentityId, out var mappedSessionId) &&
+                mappedSessionId == sessionId)
+            {
+                _identityToSession.Remove(session.IdentityId);
+            }
+
+            session.IdentityId = null;
+            session.CharacterId = null;
+            if (session.AuthState == ServerSessionAuthState.Accepted)
+                session.State = ServerSessionState.AssociationPending;
+            session.LastActivityAtUtc = utcNow;
+        }
+    }
+
     public bool CloseSession(Guid sessionId, ServerSessionCloseReason reason, DateTimeOffset? now = null)
     {
         var utcNow = now ?? DateTimeOffset.UtcNow;

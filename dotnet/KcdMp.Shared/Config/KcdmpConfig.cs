@@ -18,7 +18,11 @@ public class KcdmpConfig
     public string FriendIp { get; set; } = "";
     public int GameApiPort { get; set; } = 1404;
     public string SteamName { get; set; } = "auto";
+    public string PersistentToken { get; set; } = "";
+    public string SteamId { get; set; } = "";
+    public string CharacterId { get; set; } = "";
     public bool IdentityRequireWhitelist { get; set; } = false;
+    public bool CharacterRequireOnConnect { get; set; } = false;
     public string ObservabilityMinSeverity { get; set; } = "Information";
     public bool ObservabilityIncludeSyncMicroEvents { get; set; } = false;
 

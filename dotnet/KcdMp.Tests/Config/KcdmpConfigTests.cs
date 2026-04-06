@@ -15,6 +15,10 @@ public class KcdmpConfigTests
         Assert.Equal("", config.FriendIp);
         Assert.Equal(1404, config.GameApiPort);
         Assert.Equal("auto", config.SteamName);
+        Assert.Equal("", config.PersistentToken);
+        Assert.Equal("", config.SteamId);
+        Assert.Equal("", config.CharacterId);
+        Assert.False(config.CharacterRequireOnConnect);
     }
 
     [Fact]
@@ -26,6 +30,10 @@ public class KcdmpConfigTests
             Port = 9999,
             Password = "secret",
             FriendIp = "192.168.1.50",
+            PersistentToken = "token_a",
+            SteamId = "steam_1",
+            CharacterId = "cid_123",
+            CharacterRequireOnConnect = true,
         };
         var json = config.ToJson();
         var loaded = KcdmpConfig.FromJson(json);
@@ -33,6 +41,10 @@ public class KcdmpConfigTests
         Assert.Equal(9999, loaded.Port);
         Assert.Equal("secret", loaded.Password);
         Assert.Equal("192.168.1.50", loaded.FriendIp);
+        Assert.Equal("token_a", loaded.PersistentToken);
+        Assert.Equal("steam_1", loaded.SteamId);
+        Assert.Equal("cid_123", loaded.CharacterId);
+        Assert.True(loaded.CharacterRequireOnConnect);
     }
 
     [Fact]

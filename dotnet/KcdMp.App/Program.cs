@@ -1,4 +1,5 @@
 using KcdMp.Client;
+using KcdMp.Server.Characters;
 using KcdMp.Server.Identity;
 using KcdMp.Server;
 using KcdMp.Server.Observability;
@@ -42,6 +43,10 @@ var identityOptions = new PlayerIdentityOptions
 {
     RequireWhitelistForPendingIdentity = config.IdentityRequireWhitelist,
 };
+var characterBindingOptions = new CharacterSessionBindingOptions
+{
+    RequireCharacterOnConnect = config.CharacterRequireOnConnect,
+};
 
 if (config.Mode == "host")
 {
@@ -53,10 +58,20 @@ if (config.Mode == "host")
         config.Port,
         password: config.Password,
         identityOptions: identityOptions,
+        characterBindingOptions: characterBindingOptions,
         observabilityOptions: observabilityOptions);
     _ = server.RunAsync(cts.Token);
 
-    await ClientLauncher.RunAsync("localhost", config.Port, "", name, gameApi, cts.Token);
+    await ClientLauncher.RunAsync(
+        "localhost",
+        config.Port,
+        "",
+        name,
+        gameApi,
+        config.PersistentToken,
+        config.SteamId,
+        config.CharacterId,
+        cts.Token);
 }
 else
 {
@@ -69,7 +84,16 @@ else
     }
 
     Log.Information("Host    : {Host}", $"{config.FriendIp}:{config.Port}");
-    await ClientLauncher.RunAsync(config.FriendIp, config.Port, config.Password, name, gameApi, cts.Token);
+    await ClientLauncher.RunAsync(
+        config.FriendIp,
+        config.Port,
+        config.Password,
+        name,
+        gameApi,
+        config.PersistentToken,
+        config.SteamId,
+        config.CharacterId,
+        cts.Token);
 }
 
 static LogEventLevel ParseLogLevel(string configuredLevel)

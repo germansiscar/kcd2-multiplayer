@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Globalization;
 using System.Net.Sockets;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using Serilog;
 using KcdMp.Shared.Protocol;
@@ -25,7 +26,16 @@ namespace KcdMp.Client;
 ///     This cuts per-tick latency from ~50 ms to ~15 ms.
 ///   - Combat state changes trigger StateUpdate packets on the background loop.
 /// </summary>
-public partial class GameBridge(string serverHost, int serverPort, string password, string name, string gameApiBase, Serilog.ILogger? logger = null)
+public partial class GameBridge(
+    string serverHost,
+    int serverPort,
+    string password,
+    string name,
+    string gameApiBase,
+    string? persistentToken = null,
+    string? steamId = null,
+    string? characterId = null,
+    Serilog.ILogger? logger = null)
 {
     private const int TickMs           = 10;
     private const int RotStateIntervalMs = 80;
@@ -141,7 +151,7 @@ public partial class GameBridge(string serverHost, int serverPort, string passwo
         }
 
         // --- Handshake ---
-        await stream.WriteAsync(PacketWriter.Handshake(name));
+        await stream.WriteAsync(PacketWriter.Handshake(BuildHandshakePayload()));
 
         // --- Ack (S→C  0xFF [id:1]) ---
         var ackPacket = await stream.ReadPacketAsync();
@@ -398,6 +408,25 @@ public partial class GameBridge(string serverHost, int serverPort, string passwo
 
     private static string EscapeLua(string s) =>
         s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "").Replace("\0", "");
+
+    private string BuildHandshakePayload()
+    {
+        var trimmedToken = string.IsNullOrWhiteSpace(persistentToken) ? null : persistentToken.Trim();
+        var trimmedSteamId = string.IsNullOrWhiteSpace(steamId) ? null : steamId.Trim();
+        var trimmedCharacterId = string.IsNullOrWhiteSpace(characterId) ? null : characterId.Trim();
+
+        if (trimmedToken is null && trimmedSteamId is null && trimmedCharacterId is null)
+            return name;
+
+        var payload = new Dictionary<string, string?>
+        {
+            ["displayName"] = name,
+            ["persistentToken"] = trimmedToken,
+            ["steamId"] = trimmedSteamId,
+            ["characterId"] = trimmedCharacterId,
+        };
+        return JsonSerializer.Serialize(payload);
+    }
 
     // -------------------------------------------------------------------------
     // Receive loop – server pushes Ghost and Name packets to us

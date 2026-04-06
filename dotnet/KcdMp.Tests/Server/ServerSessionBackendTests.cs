@@ -80,6 +80,23 @@ public sealed class ServerSessionBackendTests
     }
 
     [Fact]
+    public void ClearIdentityAssociation_RemovesIdentityAndCharacterReferences()
+    {
+        var backend = new ServerSessionBackend();
+        var session = backend.CreateSession("client");
+        backend.MarkAuthenticationAccepted(session.SessionId);
+        backend.TryAssociateIdentity(session.SessionId, "identity_henry");
+        backend.SetCharacterReference(session.SessionId, "cid_henry");
+
+        backend.ClearIdentityAssociation(session.SessionId);
+
+        var loaded = backend.GetActiveSessions().Single(x => x.SessionId == session.SessionId);
+        Assert.Null(loaded.IdentityId);
+        Assert.Null(loaded.CharacterId);
+        Assert.Equal(ServerSessionState.AssociationPending, loaded.State);
+    }
+
+    [Fact]
     public void GetTimedOutSessionCandidates_ReturnsOnlyIdleActiveSessions()
     {
         var backend = new ServerSessionBackend(TimeSpan.FromSeconds(10));

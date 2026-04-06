@@ -1,4 +1,6 @@
 using System.Net.Sockets;
+using KcdMp.Server.Characters;
+using KcdMp.Server.Identity;
 using KcdMp.Server.Persistence;
 using KcdMp.Shared.Protocol;
 
@@ -169,6 +171,102 @@ public class RelayServerTests : IAsyncLifetime
         Assert.False(PacketReader.ParseAuthResult(rejected.Payload).ok);
     }
 
+    [Fact]
+    public async Task Client_HandshakeJson_BindsSessionToRequestedCharacter()
+    {
+        const int port = TestPort + 2;
+        var root = Path.Combine(Path.GetTempPath(), $"kcdmp_relay_bind_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        using var cts = new CancellationTokenSource();
+
+        var store = new JsonFilePersistenceStore(new JsonPersistenceOptions { BasePath = root });
+        var identities = new PlayerIdentityService(store, new NullServerObservabilitySink());
+        var characters = new CharacterProfileService(store, identities, new NullServerObservabilitySink());
+        var identity = await identities.ResolveOrCreateAsync(new PlayerIdentityClaim("Henry", "token_henry", null));
+        var character = await characters.CreateAsync(identity.Identity!.InternalId, new CharacterCreateRequest("Henry", "Skalitz", "knight"));
+
+        var server = new KcdMp.Server.RelayServer(
+            port,
+            password: TestPassword,
+            persistenceStore: store,
+            identityService: identities,
+            characterBindingOptions: new CharacterSessionBindingOptions { RequireCharacterOnConnect = true });
+        var task = server.RunAsync(cts.Token);
+        await Task.Delay(200);
+
+        try
+        {
+            using var tcp = new TcpClient();
+            await tcp.ConnectAsync("127.0.0.1", port);
+            var stream = tcp.GetStream();
+
+            await stream.WriteAsync(PacketWriter.Auth(TestPassword));
+            var authResponse = await stream.ReadPacketAsync();
+            Assert.True(PacketReader.ParseAuthResult(authResponse.Payload).ok);
+
+            var handshake = $$"""{"displayName":"Henry","persistentToken":"token_henry","characterId":"{{character.Character!.InternalId}}"}""";
+            await stream.WriteAsync(PacketWriter.Handshake(handshake));
+            var ackPacket = await stream.ReadPacketAsync();
+            Assert.Equal(PacketType.Ack, ackPacket.Type);
+
+            await Task.Delay(100);
+            var activeSession = server.GetActiveSessions().Single();
+            Assert.Equal(identity.Identity.InternalId, activeSession.IdentityId);
+            Assert.Equal(character.Character.InternalId, activeSession.CharacterId);
+        }
+        finally
+        {
+            cts.Cancel();
+            try { await task; } catch { }
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Client_WhenCharacterRequired_AndNoneExists_IsRejected()
+    {
+        const int port = TestPort + 3;
+        var root = Path.Combine(Path.GetTempPath(), $"kcdmp_relay_bind_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        using var cts = new CancellationTokenSource();
+
+        var store = new JsonFilePersistenceStore(new JsonPersistenceOptions { BasePath = root });
+        var identities = new PlayerIdentityService(store, new NullServerObservabilitySink());
+
+        var server = new KcdMp.Server.RelayServer(
+            port,
+            password: TestPassword,
+            persistenceStore: store,
+            identityService: identities,
+            characterBindingOptions: new CharacterSessionBindingOptions { RequireCharacterOnConnect = true });
+        var task = server.RunAsync(cts.Token);
+        await Task.Delay(200);
+
+        try
+        {
+            using var tcp = new TcpClient();
+            await tcp.ConnectAsync("127.0.0.1", port);
+            var stream = tcp.GetStream();
+
+            await stream.WriteAsync(PacketWriter.Auth(TestPassword));
+            var authResponse = await stream.ReadPacketAsync();
+            Assert.True(PacketReader.ParseAuthResult(authResponse.Payload).ok);
+
+            var handshake = """{"displayName":"NoChar","persistentToken":"token_no_char"}""";
+            await stream.WriteAsync(PacketWriter.Handshake(handshake));
+            var rejected = await stream.ReadPacketAsync();
+
+            Assert.Equal(PacketType.AuthResult, rejected.Type);
+            Assert.False(PacketReader.ParseAuthResult(rejected.Payload).ok);
+        }
+        finally
+        {
+            cts.Cancel();
+            try { await task; } catch { }
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     private async Task<(TcpClient tcp, NetworkStream stream, byte id)> ConnectClientAsync(string name)
     {
         var tcp = new TcpClient();
@@ -193,6 +291,13 @@ public class RelayServerTests : IAsyncLifetime
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
             await stream.ReadPacketAsync(cts.Token);
+        }
+    }
+
+    private sealed class NullServerObservabilitySink : KcdMp.Server.Observability.IServerObservabilitySink
+    {
+        public void Emit(KcdMp.Server.Observability.ServerObservableEvent observableEvent)
+        {
         }
     }
 }
