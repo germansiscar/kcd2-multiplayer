@@ -41,6 +41,12 @@ public enum ServerObservableEventType
     CharacterStatusChanged = 18,
     CharacterDeleted = 19,
     CharacterAccessDenied = 20,
+    CharacterLoadStarted = 21,
+    CharacterLoadCompleted = 22,
+    CharacterLoadFailed = 23,
+    CharacterSaveStarted = 24,
+    CharacterSaveCompleted = 25,
+    CharacterSaveFailed = 26,
 }
 
 public sealed record ServerObservableEvent(

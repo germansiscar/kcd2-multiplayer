@@ -17,7 +17,9 @@ public class RelayServer
     private readonly List<Task> _sessionTasks = [];
     private readonly ServerSessionBackend _sessionBackend;
     private readonly IPlayerIdentityService _identityService;
+    private readonly ICharacterProfileService _characterProfileService;
     private readonly ICharacterSessionBindingService _characterBindingService;
+    private readonly ICharacterLifecycleService _characterLifecycleService;
     private readonly Dictionary<Guid, ClientSession> _clientsBySessionId = [];
     private readonly object _lock = new();
     private readonly ILogger _logger;
@@ -31,12 +33,15 @@ public class RelayServer
         JsonPersistenceOptions? persistenceOptions = null,
         PlayerIdentityOptions? identityOptions = null,
         CharacterSessionBindingOptions? characterBindingOptions = null,
+        CharacterLifecycleOptions? characterLifecycleOptions = null,
         ILogger? logger = null,
         IServerObservabilitySink? observability = null,
         ServerObservabilityOptions? observabilityOptions = null,
         IJsonPersistenceStore? persistenceStore = null,
         IPlayerIdentityService? identityService = null,
-        ICharacterSessionBindingService? characterBindingService = null)
+        ICharacterProfileService? characterProfileService = null,
+        ICharacterSessionBindingService? characterBindingService = null,
+        ICharacterLifecycleService? characterLifecycleService = null)
     {
         _port = port;
         Echo = echo;
@@ -47,19 +52,27 @@ public class RelayServer
         _observability = observability ?? new SerilogServerObservabilitySink(_logger, observabilityOptions);
         var store = persistenceStore ?? new JsonFilePersistenceStore(persistenceOptions, _logger, _observability);
         _identityService = identityService ?? new PlayerIdentityService(store, _observability, identityOptions, _logger);
+        _characterProfileService = characterProfileService ?? new CharacterProfileService(store, _identityService, _observability, _logger);
         if (characterBindingService is not null)
         {
             _characterBindingService = characterBindingService;
         }
         else
         {
-            var characterService = new CharacterProfileService(store, _identityService, _observability, _logger);
             _characterBindingService = new CharacterSessionBindingService(
-                characterService,
+                _characterProfileService,
                 _identityService,
                 characterBindingOptions,
                 _logger);
         }
+
+        _characterLifecycleService = characterLifecycleService
+                                     ?? new CharacterLifecycleService(
+                                         store,
+                                         _characterProfileService,
+                                         _observability,
+                                         characterLifecycleOptions,
+                                         _logger);
     }
 
     public bool Echo { get; }
@@ -118,6 +131,7 @@ public class RelayServer
                             });
                     }
 
+                    HandleCharacterLifecycleOnSessionClose(session.SessionId, session.CloseReason);
                     _sessionBackend.CloseSession(session.SessionId, session.CloseReason);
                     _logger.Information("[-] {Client} disconnected. Clients: {ClientCount}. Reason: {CloseReason}. SessionId: {SessionId}",
                         session.Name ?? $"id={session.Id}", _clients.Count, session.CloseReason, session.SessionId);
@@ -151,6 +165,7 @@ public class RelayServer
             lock (_lock)
                 runningSessions = [.. _sessionTasks];
             await Task.WhenAll(runningSessions);
+            await _characterLifecycleService.SaveAndUnloadAllAsync(CharacterLifecycleSaveReason.Shutdown, CancellationToken.None);
             try { await timeoutTask; } catch (OperationCanceledException) { }
 
             Emit(
@@ -306,8 +321,85 @@ public class RelayServer
             return (false, binding.DenialReason ?? "Character binding denied.", resolved.Identity.InternalId);
         }
 
+        if (!string.IsNullOrWhiteSpace(binding.CharacterId))
+        {
+            var validation = await _characterLifecycleService.ValidateLightAsync(
+                resolved.Identity.InternalId,
+                binding.CharacterId!,
+                ct);
+            if (!validation.IsAllowed)
+            {
+                _sessionBackend.ClearIdentityAssociation(sessionId);
+                Emit(
+                    ServerObservableEventType.CharacterLoadFailed,
+                    ServerObservableComponent.Session,
+                    ServerObservableSeverity.Warning,
+                    "Character validation failed before load.",
+                    sessionId,
+                    payload: new Dictionary<string, object?>
+                    {
+                        ["identity_id"] = resolved.Identity.InternalId,
+                        ["character_id"] = binding.CharacterId,
+                        ["reason"] = validation.DenialReason,
+                    });
+                return (false, validation.DenialReason ?? "Character validation failed.", resolved.Identity.InternalId);
+            }
+
+            var loadResult = await _characterLifecycleService.LoadForSessionAsync(
+                sessionId,
+                resolved.Identity.InternalId,
+                binding.CharacterId!,
+                ct);
+            if (!loadResult.Loaded)
+            {
+                _sessionBackend.ClearIdentityAssociation(sessionId);
+                Emit(
+                    ServerObservableEventType.CharacterLoadFailed,
+                    ServerObservableComponent.Session,
+                    ServerObservableSeverity.Warning,
+                    "Character load failed while preparing session.",
+                    sessionId,
+                    payload: new Dictionary<string, object?>
+                    {
+                        ["identity_id"] = resolved.Identity.InternalId,
+                        ["character_id"] = binding.CharacterId,
+                        ["reason"] = loadResult.DenialReason,
+                    });
+                return (false, loadResult.DenialReason ?? "Character load failed.", resolved.Identity.InternalId);
+            }
+        }
+
         _sessionBackend.SetCharacterReference(sessionId, binding.CharacterId);
         return (true, null, resolved.Identity.InternalId);
+    }
+
+    private void HandleCharacterLifecycleOnSessionClose(Guid sessionId, ServerSessionCloseReason reason)
+    {
+        var saveReason = reason switch
+        {
+            ServerSessionCloseReason.NetworkDisconnect => CharacterLifecycleSaveReason.NetworkDisconnect,
+            ServerSessionCloseReason.Timeout => CharacterLifecycleSaveReason.SessionTimeout,
+            ServerSessionCloseReason.Shutdown => CharacterLifecycleSaveReason.Shutdown,
+            _ => CharacterLifecycleSaveReason.SessionClosed,
+        };
+
+        try
+        {
+            _characterLifecycleService
+                .SaveAndUnloadSessionAsync(sessionId, saveReason)
+                .GetAwaiter()
+                .GetResult();
+        }
+        catch (Exception ex)
+        {
+            Emit(
+                ServerObservableEventType.CharacterSaveFailed,
+                ServerObservableComponent.Persistence,
+                ServerObservableSeverity.Error,
+                "Character save on session close failed.",
+                sessionId,
+                payload: new Dictionary<string, object?> { ["exception"] = ex.Message });
+        }
     }
 
     internal void EmitBackendError(Guid? sessionId, string message, Exception? ex = null)
