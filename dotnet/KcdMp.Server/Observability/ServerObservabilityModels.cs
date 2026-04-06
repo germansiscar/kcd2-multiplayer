@@ -81,6 +81,10 @@ public enum ServerObservableEventType
     InventoryRuleApplied = 58,
     InventoryLootabilityChanged = 59,
     InventoryRuleApplyFailed = 60,
+    AccessControlConfigLoaded = 61,
+    AccessControlConfigValidationFailed = 62,
+    AccessDecisionAllowed = 63,
+    AccessDecisionDenied = 64,
 }
 
 public sealed record ServerObservableEvent(
