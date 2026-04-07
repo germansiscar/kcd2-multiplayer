@@ -198,8 +198,9 @@ public sealed class CharacterCurrencyService : ICharacterCurrencyService
             sessionId,
             balanceUpdater: _ => balance,
             reason: "set",
-            payloadFactory: (_, next) => new Dictionary<string, object?>
+            payloadFactory: (current, next) => new Dictionary<string, object?>
             {
+                ["previous_balance"] = current,
                 ["new_balance"] = next,
             },
             ct);

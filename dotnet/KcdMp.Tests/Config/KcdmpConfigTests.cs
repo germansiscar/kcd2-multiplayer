@@ -28,6 +28,8 @@ public class KcdmpConfigTests
         Assert.Equal("default_spawn", config.RespawnDefaultPointId);
         Assert.Equal(1, config.RespawnSaveRetryCount);
         Assert.Equal(100, config.RespawnSaveRetryDelayMs);
+        Assert.True(config.AuditEnabled);
+        Assert.Equal(30, config.AuditRetentionDays);
     }
 
     [Fact]
@@ -52,6 +54,8 @@ public class KcdmpConfigTests
             RespawnDefaultPointId = "rattay_square",
             RespawnSaveRetryCount = 2,
             RespawnSaveRetryDelayMs = 250,
+            AuditEnabled = true,
+            AuditRetentionDays = 45,
         };
         var json = config.ToJson();
         var loaded = KcdmpConfig.FromJson(json);
@@ -72,6 +76,8 @@ public class KcdmpConfigTests
         Assert.Equal("rattay_square", loaded.RespawnDefaultPointId);
         Assert.Equal(2, loaded.RespawnSaveRetryCount);
         Assert.Equal(250, loaded.RespawnSaveRetryDelayMs);
+        Assert.True(loaded.AuditEnabled);
+        Assert.Equal(45, loaded.AuditRetentionDays);
     }
 
     [Fact]

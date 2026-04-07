@@ -34,6 +34,8 @@ public class KcdmpConfig
     public int RespawnSaveRetryDelayMs { get; set; } = 100;
     public string ObservabilityMinSeverity { get; set; } = "Information";
     public bool ObservabilityIncludeSyncMicroEvents { get; set; } = false;
+    public bool AuditEnabled { get; set; } = true;
+    public int AuditRetentionDays { get; set; } = 30;
 
     public string ToJson() => JsonSerializer.Serialize(this, JsonOpts);
 

@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using KcdMp.Server.AccessControl;
+using KcdMp.Server.Audit;
 using KcdMp.Server.Characters;
 using KcdMp.Server.Currency;
 using KcdMp.Server.Identity;
@@ -52,6 +53,7 @@ public class RelayServer
         ILogger? logger = null,
         IServerObservabilitySink? observability = null,
         ServerObservabilityOptions? observabilityOptions = null,
+        ServerAuditOptions? auditOptions = null,
         IJsonPersistenceStore? persistenceStore = null,
         IServerAccessControlService? accessControlService = null,
         IPlayerIdentityService? identityService = null,
@@ -69,7 +71,22 @@ public class RelayServer
         _logger = logger ?? Log.Logger;
         _sessionBackend = new ServerSessionBackend(sessionIdleTimeout);
         _sessionBackend.LifecycleEventEmitted += HandleSessionLifecycleEvent;
-        _observability = observability ?? new SerilogServerObservabilitySink(_logger, observabilityOptions);
+        if (observability is not null)
+        {
+            _observability = observability;
+        }
+        else
+        {
+            var runtimeObservability = new SerilogServerObservabilitySink(_logger, observabilityOptions);
+            var auditObservability = new PersistentAuditObservabilitySink(
+                persistenceOptions,
+                auditOptions,
+                _logger);
+            _observability = new CompositeServerObservabilitySink(
+                [runtimeObservability, auditObservability],
+                _logger);
+        }
+
         var store = persistenceStore ?? new JsonFilePersistenceStore(persistenceOptions, _logger, _observability);
         _accessControlService = accessControlService ?? new ServerAccessControlService(store, _observability, accessControlOptions, _logger);
         _identityService = identityService ?? new PlayerIdentityService(store, _observability, identityOptions, _logger);

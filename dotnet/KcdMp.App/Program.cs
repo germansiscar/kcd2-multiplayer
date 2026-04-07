@@ -1,5 +1,6 @@
 using KcdMp.Client;
 using KcdMp.Server.AccessControl;
+using KcdMp.Server.Audit;
 using KcdMp.Server.Characters;
 using KcdMp.Server.Currency;
 using KcdMp.Server.Identity;
@@ -42,6 +43,11 @@ var observabilityOptions = new ServerObservabilityOptions
     MinimumSeverity = ParseObservabilitySeverity(config.ObservabilityMinSeverity),
     IncludeSyncMicroEvents = config.ObservabilityIncludeSyncMicroEvents,
 };
+var auditOptions = new ServerAuditOptions
+{
+    Enabled = config.AuditEnabled,
+    RetentionDays = config.AuditRetentionDays,
+};
 var accessMode = ResolveAccessMode(config.ServerAccessMode, config.IdentityRequireWhitelist);
 var accessControlOptions = new ServerAccessControlOptions
 {
@@ -75,6 +81,7 @@ if (config.Mode == "host")
     Log.Information("Password: {Password}", string.IsNullOrEmpty(config.Password) ? "(none)" : "****");
     Log.Information("Access mode (bootstrap default): {Mode}", accessMode);
     Log.Information("Observability severity: {Severity}", observabilityOptions.MinimumSeverity);
+    Log.Information("Audit enabled: {Enabled} (retention days: {RetentionDays})", auditOptions.Enabled, auditOptions.RetentionDays);
     Log.Information("Currency initial balance: {Balance}", currencyOptions.InitialBalance);
     Log.Information("Respawn unconscious duration (s): {Duration}", respawnOptions.UnconsciousDuration.TotalSeconds);
 
@@ -86,6 +93,7 @@ if (config.Mode == "host")
         characterBindingOptions: characterBindingOptions,
         characterCurrencyOptions: currencyOptions,
         characterRespawnOptions: respawnOptions,
+        auditOptions: auditOptions,
         observabilityOptions: observabilityOptions);
     _ = server.RunAsync(cts.Token);
 
