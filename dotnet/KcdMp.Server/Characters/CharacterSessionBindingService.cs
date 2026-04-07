@@ -38,7 +38,7 @@ public sealed class CharacterSessionBindingService : ICharacterSessionBindingSer
             if (identity is null || identity.IsDeactivated || identity.Status == PlayerIdentityStatus.Blocked)
                 return Denied("Identity not available.");
 
-            var ownedCharacters = await _characters.ListByIdentityAsync(identityId, ct);
+            var ownedCharacters = (await _characters.ListByIdentityAsync(identityId, ct)).ToList();
 
             if (preferred is not null)
             {
@@ -52,6 +52,20 @@ public sealed class CharacterSessionBindingService : ICharacterSessionBindingSer
             }
 
             var selected = ResolveSelectedCharacterAsync(preferred, ownedCharacters);
+            if (selected is null && preferred is null && ownedCharacters.Count == 0 && !_options.RequireCharacterOnConnect)
+            {
+                var bootstrapCharacter = await TryCreateBootstrapCharacterAsync(identity, ct);
+                if (bootstrapCharacter is not null)
+                {
+                    ownedCharacters.Add(bootstrapCharacter);
+                    selected = bootstrapCharacter;
+                    _logger.Information(
+                        "[character-bind] identity={IdentityId} bootstrap_character={CharacterId}",
+                        identityId,
+                        bootstrapCharacter.InternalId);
+                }
+            }
+
             if (selected is null)
             {
                 if (_options.RequireCharacterOnConnect)
@@ -102,6 +116,52 @@ public sealed class CharacterSessionBindingService : ICharacterSessionBindingSer
             .ThenByDescending(x => x.LastActivityAtUtc)
             .ThenByDescending(x => x.CreatedAtUtc)
             .FirstOrDefault();
+    }
+
+    private async Task<CharacterProfileRecord?> TryCreateBootstrapCharacterAsync(
+        PlayerIdentityRecord identity,
+        CancellationToken ct)
+    {
+        var givenName = ExtractGivenName(identity.DisplayName);
+        var suffix = identity.InternalId.Length >= 6
+            ? identity.InternalId[^6..]
+            : identity.InternalId;
+        var familyName = $"Traveler{suffix}";
+        var metadata = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["bootstrap"] = "true",
+            ["source"] = "auto_on_first_connect",
+        };
+
+        var created = await _characters.CreateAsync(
+            identity.InternalId,
+            new CharacterCreateRequest(
+                GivenName: givenName,
+                FamilyName: familyName,
+                ModelKey: "knight",
+                Metadata: metadata),
+            ct);
+
+        if (!created.Created || created.Character is null)
+        {
+            _logger.Warning(
+                "[character-bind] identity={IdentityId} bootstrap create failed reason={Reason}",
+                identity.InternalId,
+                created.DenialReason ?? "unknown");
+            return null;
+        }
+
+        return created.Character;
+    }
+
+    private static string ExtractGivenName(string? displayName)
+    {
+        if (string.IsNullOrWhiteSpace(displayName))
+            return "Player";
+
+        var parts = displayName
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return parts.Length > 0 ? parts[0] : "Player";
     }
 
     private CharacterSessionBindingResult Denied(string reason)

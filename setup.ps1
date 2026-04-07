@@ -63,7 +63,18 @@ $modSrc = "$scriptDir\kdcmp"
 
 if (Test-Path $modSrc) {
     Write-Host "Installing mod to $modDest..."
-    Copy-Item -Path $modSrc -Destination $modDest -Recurse -Force
+    if (-not (Test-Path $modDest)) {
+        New-Item -ItemType Directory -Path $modDest -Force | Out-Null
+    }
+
+    # Copy mod contents, not the source folder itself, to avoid Mods\kdcmp\kdcmp nesting.
+    Copy-Item -Path "$modSrc\*" -Destination $modDest -Recurse -Force
+
+    $nestedPath = Join-Path $modDest "kdcmp"
+    if (Test-Path $nestedPath) {
+        Write-Host "Removing accidental nested folder: $nestedPath" -ForegroundColor Yellow
+        Remove-Item -LiteralPath $nestedPath -Recurse -Force
+    }
     Write-Host "Mod installed." -ForegroundColor Green
 } else {
     Write-Host "WARNING: kdcmp folder not found next to setup.ps1. Install mod manually." -ForegroundColor Yellow

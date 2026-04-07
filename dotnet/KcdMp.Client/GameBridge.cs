@@ -37,6 +37,9 @@ public partial class GameBridge(
     string? characterId = null,
     Serilog.ILogger? logger = null)
 {
+    private const int GameApiTimeoutMs = 8000;
+    private const int GameApiMaxAttempts = 2;
+    private const int GameApiRetryDelayMs = 120;
     private const int TickMs           = 10;
     private const int RotStateIntervalMs = 80;
     private const float PosThreshold  = 0.05f;
@@ -44,7 +47,7 @@ public partial class GameBridge(
     private const string ProjectionResultCvarName = "sv_servername";
 
     private readonly ILogger _logger = logger ?? Log.Logger;
-    private readonly HttpClient _http = new() { Timeout = TimeSpan.FromMilliseconds(800) };
+    private readonly HttpClient _http = new() { Timeout = TimeSpan.FromMilliseconds(GameApiTimeoutMs) };
 
     // Last pushed position (for change detection)
     private float _lastX, _lastY, _lastZ, _lastRotZ;
@@ -63,6 +66,9 @@ public partial class GameBridge(
 
     // Serializes access to sv_servername CVar (both StateLoop and DamageEventLoop use it)
     private readonly SemaphoreSlim _cvarLock = new(1, 1);
+    // The debug REST API is fragile under concurrent ExecuteString requests.
+    // Serialize Lua execution to avoid overlapping calls timing out each other.
+    private readonly SemaphoreSlim _luaExecLock = new(1, 1);
 
     // Ping: maps sent timestamp (ticks) → Stopwatch timestamp at send time
     private readonly System.Collections.Concurrent.ConcurrentDictionary<long, long> _pingsSent = new();
@@ -941,8 +947,35 @@ end)())");
 
     private async Task ExecLuaAsync(string lua)
     {
-        var cmd = Uri.EscapeDataString($"#{lua}");
-        await _http.GetStringAsync($"{gameApiBase}/api/System/Console/ExecuteString?command={cmd}");
+        await _luaExecLock.WaitAsync();
+        try
+        {
+            var cmd = Uri.EscapeDataString($"#{lua}");
+            var url = $"{gameApiBase}/api/System/Console/ExecuteString?command={cmd}";
+
+            for (var attempt = 1; attempt <= GameApiMaxAttempts; attempt++)
+            {
+                try
+                {
+                    await _http.GetStringAsync(url);
+                    return;
+                }
+                catch (TaskCanceledException ex) when (attempt < GameApiMaxAttempts)
+                {
+                    _logger.Warning(ex, "Game API timeout while executing Lua command (attempt {Attempt}/{MaxAttempts}).", attempt, GameApiMaxAttempts);
+                    await Task.Delay(GameApiRetryDelayMs);
+                }
+                catch (HttpRequestException ex) when (attempt < GameApiMaxAttempts)
+                {
+                    _logger.Warning(ex, "Game API request failed while executing Lua command (attempt {Attempt}/{MaxAttempts}).", attempt, GameApiMaxAttempts);
+                    await Task.Delay(GameApiRetryDelayMs);
+                }
+            }
+        }
+        finally
+        {
+            _luaExecLock.Release();
+        }
     }
 
     // -------------------------------------------------------------------------

@@ -1,5 +1,7 @@
 -- KCD2 Multiplayer - Mod Init Script
 System.LogAlways("[KCD2-MP] === MOD INIT ===")
+local KCD2MP_RUNTIME_VERSION = "kdcmp-runtime 2026-04-07a"
+System.LogAlways("[KCD2-MP] Runtime version: " .. KCD2MP_RUNTIME_VERSION)
 
 KCD2MP = {}
 KCD2MP.running = false
@@ -41,6 +43,11 @@ function KCD2MP_PopLog()
 end
 
 mp_log("MOD INIT")
+mp_log("Runtime version: " .. KCD2MP_RUNTIME_VERSION)
+
+function KCD2MP_GetRuntimeVersion()
+    return KCD2MP_RUNTIME_VERSION
+end
 
 -- ===== Math Helpers =====
 
@@ -2407,9 +2414,30 @@ end
 
 local function _kcd2mp_is_runtime_managed_entity_name(name)
     if not name or name == "" then return false end
-    return string.sub(name, 1, 12) == "kcd2mp_ghost"
+    return string.sub(name, 1, 6) == "kcd2mp"
+        or string.sub(name, 1, 12) == "kcd2mp_ghost"
         or string.sub(name, 1, 12) == "kcd2mp_horse"
         or string.sub(name, 1, 10) == "kcd2mp_npc"
+end
+
+local function _kcd2mp_is_probable_world_npc(ent, entName, entClass)
+    local isCharacter = false
+    pcall(function() isCharacter = ent:IsSlotCharacter(0) end)
+    if isCharacter then return true end
+
+    local lc = string.lower(tostring(entClass or ""))
+    local ln = string.lower(tostring(entName or ""))
+
+    if lc:find("horse") or lc:find("animal") or lc:find("creature") then return false end
+    if ln:find("horse") or ln:find("animal") or ln:find("creature") then return false end
+    if lc:find("player") or ln:find("player") then return false end
+
+    if lc:find("npc") or lc:find("human") then return true end
+    if ln:find("guard") or ln:find("bandit") or ln:find("villager") or ln:find("citizen") then return true end
+
+    local isHumanLike = false
+    pcall(function() isHumanLike = (ent.soul ~= nil) or (ent.human ~= nil) or (ent.actor ~= nil) end)
+    return isHumanLike
 end
 
 local function _kcd2mp_cleanup_original_npcs_near_player(radius)
@@ -2421,22 +2449,25 @@ local function _kcd2mp_cleanup_original_npcs_near_player(radius)
     end
 
     local removedCount = 0
+    local inspectedCount = 0
+    local candidateCount = 0
     local ok, err = pcall(function()
         local ppos = player:GetWorldPos()
         local ents = System.GetEntitiesInSphere(ppos, radius)
         if not ents then return end
 
         for _, ent in ipairs(ents) do
-            local isCharacter = false
-            local isHumanLike = false
             local entId = nil
             local entName = ""
+            local entClass = ""
+            inspectedCount = inspectedCount + 1
 
-            pcall(function() isCharacter = ent:IsSlotCharacter(0) end)
-            pcall(function() isHumanLike = (ent.soul ~= nil) or (ent.human ~= nil) or (ent.actor ~= nil) end)
-            if isCharacter and isHumanLike then
+            pcall(function() entClass = tostring(ent.class or "") end)
+            if entClass == "" then pcall(function() entClass = tostring(ent:GetClass() or "") end) end
+            pcall(function() entName = tostring(ent:GetName() or "") end)
+
+            if _kcd2mp_is_probable_world_npc(ent, entName, entClass) then
                 pcall(function() entId = ent.id end)
-                pcall(function() entName = tostring(ent:GetName() or "") end)
 
                 local isPlayerEntity = false
                 pcall(function()
@@ -2446,6 +2477,7 @@ local function _kcd2mp_cleanup_original_npcs_near_player(radius)
                 end)
 
                 if not isPlayerEntity and not _kcd2mp_is_runtime_managed_entity_name(entName) and entId then
+                    candidateCount = candidateCount + 1
                     local removed = false
                     pcall(function()
                         System.RemoveEntity(entId)
@@ -2453,6 +2485,10 @@ local function _kcd2mp_cleanup_original_npcs_near_player(radius)
                     end)
                     if removed then
                         removedCount = removedCount + 1
+                    elseif candidateCount <= 3 then
+                        _kcd2mp_world_init_log(
+                            "npc_cleanup_remove_failed",
+                            string.format("name=%s class=%s id=%s", tostring(entName), tostring(entClass), tostring(entId)))
                     end
                 end
             end
@@ -2463,7 +2499,115 @@ local function _kcd2mp_cleanup_original_npcs_near_player(radius)
         return false, tostring(err), removedCount
     end
 
+    _kcd2mp_world_init_log(
+        "npc_cleanup_scan",
+        string.format("radius=%s inspected=%d candidates=%d removed=%d", tostring(radius), inspectedCount, candidateCount, removedCount))
     return true, "", removedCount
+end
+
+local function _kcd2mp_try_remove_candidate_entity(ent)
+    if not ent then return false, "entity_nil" end
+
+    local entId = nil
+    local entName = ""
+    local entClass = ""
+    pcall(function() entId = ent.id end)
+    pcall(function() entName = tostring(ent:GetName() or "") end)
+    pcall(function() entClass = tostring(ent.class or "") end)
+    if entClass == "" then pcall(function() entClass = tostring(ent:GetClass() or "") end) end
+
+    if not entId then return false, "missing_id" end
+    if _kcd2mp_is_runtime_managed_entity_name(entName) then return false, "runtime_managed" end
+
+    local isPlayerEntity = false
+    pcall(function()
+        if player and player.id then
+            isPlayerEntity = (player.id == entId)
+        end
+    end)
+    if isPlayerEntity then return false, "player_entity" end
+
+    if not _kcd2mp_is_probable_world_npc(ent, entName, entClass) then
+        return false, "not_world_npc"
+    end
+
+    local removed = false
+    pcall(function()
+        System.RemoveEntity(entId)
+        removed = true
+    end)
+    if removed then
+        return true, "removed"
+    end
+
+    return false, "remove_failed"
+end
+
+local function _kcd2mp_cleanup_original_npcs_global()
+    if not System then
+        return false, "system_missing", 0
+    end
+    if not System.GetEntityByClass then
+        return false, "get_entity_by_class_unavailable", 0
+    end
+
+    local classesToSweep = { "NPC", "Human", "Actor" }
+    local removedCount = 0
+    local inspectedCount = 0
+    local maxIterationsPerClass = 4000
+
+    for _, className in ipairs(classesToSweep) do
+        local seenIds = {}
+        for _ = 1, maxIterationsPerClass do
+            local ent = nil
+            pcall(function() ent = System.GetEntityByClass(className) end)
+            if not ent then break end
+
+            local entId = nil
+            pcall(function() entId = ent.id end)
+            if entId and seenIds[entId] then
+                break
+            end
+            if entId then
+                seenIds[entId] = true
+            end
+
+            inspectedCount = inspectedCount + 1
+            local removed, _ = _kcd2mp_try_remove_candidate_entity(ent)
+            if removed then
+                removedCount = removedCount + 1
+            end
+        end
+    end
+
+    if removedCount > 0 then
+        _kcd2mp_world_init_log(
+            "npc_cleanup_global",
+            string.format("inspected=%d removed=%d", inspectedCount, removedCount))
+        return true, "", removedCount
+    end
+
+    -- Fallback for environments where global class lookup is limited.
+    local ok, reason, removed = _kcd2mp_cleanup_original_npcs_near_player(260)
+    _kcd2mp_world_init_log(
+        "npc_cleanup_global_fallback",
+        string.format("reason=%s removed=%d", tostring(reason or ""), removed or 0))
+    return ok, reason, removed or 0
+end
+
+local function _kcd2mp_schedule_npc_cleanup_retry(cycleId, radius, passIndex, totalPasses, delayMs)
+    Script.SetTimer(delayMs, function()
+        local ok, reason, removed = _kcd2mp_cleanup_original_npcs_global()
+        if ok then
+            _kcd2mp_world_init_log(
+                "npc_cleanup_retry",
+                string.format("cycle=%s pass=%d/%d removed=%d", tostring(cycleId), passIndex, totalPasses, removed or 0))
+        else
+            _kcd2mp_world_init_log(
+                "npc_cleanup_retry",
+                string.format("cycle=%s pass=%d/%d failed=%s", tostring(cycleId), passIndex, totalPasses, tostring(reason or "unknown")))
+        end
+    end)
 end
 
 function KCD2MP_ApplySessionContext(jsonStr)
@@ -2622,7 +2766,7 @@ function KCD2MP_ApplyWorldInitialization(jsonStr, forceReapply)
     local criticalServerStateApply = _kcd2mp_read_json_bool(jsonStr, "criticalServerStateApply")
     local authoritativeStateReady = _kcd2mp_read_json_bool(jsonStr, "authoritativeStateReady")
     local reapplyOnZoneLoad = _kcd2mp_read_json_bool(jsonStr, "reapplyOnZoneLoad")
-    local npcCleanupRadius = _kcd2mp_read_json_number(jsonStr, "npcCleanupRadius") or 140
+    local npcCleanupRadius = _kcd2mp_read_json_number(jsonStr, "npcCleanupRadius") or 260
 
     if criticalNpcCleanup == nil then criticalNpcCleanup = true end
     if criticalInventoryCleanup == nil then criticalInventoryCleanup = true end
@@ -2668,8 +2812,11 @@ function KCD2MP_ApplyWorldInitialization(jsonStr, forceReapply)
         _kcd2mp_world_init_log(name, status .. " " .. details)
     end
 
-    local npcOk, npcErr, npcRemoved = _kcd2mp_cleanup_original_npcs_near_player(npcCleanupRadius)
+    local npcOk, npcErr, npcRemoved = _kcd2mp_cleanup_original_npcs_global()
     record_step("npc_cleanup", npcOk, npcOk and ("removed=" .. tostring(npcRemoved)) or npcErr, criticalNpcCleanup, false)
+    _kcd2mp_schedule_npc_cleanup_retry(cycleId, npcCleanupRadius, 1, 3, 1200)
+    _kcd2mp_schedule_npc_cleanup_retry(cycleId, npcCleanupRadius, 2, 3, 2800)
+    _kcd2mp_schedule_npc_cleanup_retry(cycleId, npcCleanupRadius, 3, 3, 5200)
 
     local invOk, invErr = pcall(function()
         if player and player.inventory and player.inventory.RemoveAllItems then
@@ -2741,6 +2888,10 @@ function KCD2MP_OnPlayerLoaded(reason)
 
     _kcd2mp_world_init_log("reapply", string.format("reason=%s cycle=%s", tostring(reason or "unknown"), newCycleId))
     KCD2MP_ApplyWorldInitialization(patchedPayload, true)
+    Script.SetTimer(1800, function()
+        _kcd2mp_world_init_log("reapply_retry", string.format("reason=%s cycle=%s delayed=1800ms", tostring(reason or "unknown"), newCycleId))
+        KCD2MP_ApplyWorldInitialization(patchedPayload, true)
+    end)
 end
 
 function KCD2MP_ClearRuntimeProjectionState(reason)
