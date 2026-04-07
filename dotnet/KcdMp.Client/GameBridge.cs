@@ -41,6 +41,7 @@ public partial class GameBridge(
     private const int RotStateIntervalMs = 80;
     private const float PosThreshold  = 0.05f;
     private const float RotThreshold  = 0.02f;
+    private const string ProjectionResultCvarName = "sv_servername";
 
     private readonly ILogger _logger = logger ?? Log.Logger;
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromMilliseconds(800) };
@@ -67,6 +68,11 @@ public partial class GameBridge(
     private readonly System.Collections.Concurrent.ConcurrentDictionary<long, long> _pingsSent = new();
     private readonly ClientDerivedState _derivedState = new();
     private volatile bool _sessionInvalidated;
+    private sealed record RuntimeProjectionApplyResult(
+        ProjectionApplyStatus Status,
+        string Code,
+        string Message,
+        string RawValue);
 
     public async Task RunAsync(CancellationToken ct = default)
     {
@@ -555,15 +561,19 @@ public partial class GameBridge(
         try
         {
             ApplyDerivedStateProjection(domain, json);
-            await ApplyProjectionDomainAsync(domain, json);
-            var finalStatus = applicability switch
-            {
-                ProjectionApplicability.Direct => ProjectionApplyStatus.Applied,
-                ProjectionApplicability.Partial => ProjectionApplyStatus.PartiallyApplied,
-                _ => ProjectionApplyStatus.NotApplied,
-            };
+            var runtimeApply = await ApplyProjectionDomainAsync(domain, json);
+            var finalStatus = ResolveFinalProjectionStatus(applicability, runtimeApply.Status);
             _derivedState.MarkProjectionResult(domain, finalStatus);
-            var details = $$"""{"message":"projection applied","domain":"{{domain}}","applicability":"{{applicability}}"}""";
+            var details = JsonSerializer.Serialize(new
+            {
+                message = "projection apply completed",
+                domain = domain.ToString(),
+                applicability = applicability.ToString(),
+                runtimeStatus = runtimeApply.Status.ToString(),
+                runtimeCode = runtimeApply.Code,
+                runtimeMessage = runtimeApply.Message,
+                runtimeRaw = runtimeApply.RawValue,
+            });
             await SendProjectionApplyStatusAsync(stream, projectionId, domainRaw, finalStatus, details, CancellationToken.None);
 
             if (finalStatus is ProjectionApplyStatus.PartiallyApplied or ProjectionApplyStatus.NotApplied)
@@ -606,32 +616,115 @@ public partial class GameBridge(
         await stream.WriteAsync(packet, ct);
     }
 
-    private async Task ApplyProjectionDomainAsync(ProjectionDomain domain, string json)
+    private static ProjectionApplyStatus ResolveFinalProjectionStatus(
+        ProjectionApplicability applicability,
+        ProjectionApplyStatus runtimeStatus)
+    {
+        if (runtimeStatus is ProjectionApplyStatus.Failed or ProjectionApplyStatus.NotApplied or ProjectionApplyStatus.PartiallyApplied)
+            return runtimeStatus;
+
+        return applicability switch
+        {
+            ProjectionApplicability.Direct => ProjectionApplyStatus.Applied,
+            ProjectionApplicability.Partial => ProjectionApplyStatus.PartiallyApplied,
+            _ => ProjectionApplyStatus.NotApplied,
+        };
+    }
+
+    private async Task<RuntimeProjectionApplyResult> ApplyProjectionDomainAsync(ProjectionDomain domain, string json)
     {
         var safeJson = EscapeLua(json);
         switch (domain)
         {
             case ProjectionDomain.SessionCharacter:
-                await ExecLuaAsync($"KCD2MP_ApplySessionContext(\"{safeJson}\")");
-                break;
+                return await InvokeRuntimeProjectionApplyAsync("KCD2MP_ApplySessionContext", safeJson);
             case ProjectionDomain.Presence:
-                await ExecLuaAsync($"KCD2MP_ApplyPresenceProjection(\"{safeJson}\")");
-                break;
+                return await InvokeRuntimeProjectionApplyAsync("KCD2MP_ApplyPresenceProjection", safeJson);
             case ProjectionDomain.LifeCycle:
-                await ExecLuaAsync($"KCD2MP_ApplyLifecycleProjection(\"{safeJson}\")");
-                break;
+                return await InvokeRuntimeProjectionApplyAsync("KCD2MP_ApplyLifecycleProjection", safeJson);
             case ProjectionDomain.Inventory:
-                await ExecLuaAsync($"KCD2MP_ApplyInventoryProjection(\"{safeJson}\")");
-                break;
+                return await InvokeRuntimeProjectionApplyAsync("KCD2MP_ApplyInventoryProjection", safeJson);
             case ProjectionDomain.Currency:
-                await ExecLuaAsync($"KCD2MP_ApplyCurrencyProjection(\"{safeJson}\")");
-                break;
+                return await InvokeRuntimeProjectionApplyAsync("KCD2MP_ApplyCurrencyProjection", safeJson);
             case ProjectionDomain.Administrative:
-                await ExecLuaAsync($"KCD2MP_ApplyAdministrativeProjection(\"{safeJson}\")");
-                break;
+                return await InvokeRuntimeProjectionApplyAsync("KCD2MP_ApplyAdministrativeProjection", safeJson);
             default:
-                await ExecLuaAsync($"KCD2MP_ApplySessionContext(\"{safeJson}\")");
-                break;
+                return await InvokeRuntimeProjectionApplyAsync("KCD2MP_ApplySessionContext", safeJson);
+        }
+    }
+
+    private async Task<RuntimeProjectionApplyResult> InvokeRuntimeProjectionApplyAsync(string luaFunctionName, string safeJson)
+    {
+        await _cvarLock.WaitAsync();
+        try
+        {
+            await ExecLuaAsync(
+                $@"System.SetCVar(""{ProjectionResultCvarName}"",(function()
+local fn = {luaFunctionName}
+if type(fn) ~= 'function' then return 'failed|missing_handler|{luaFunctionName}' end
+local ok, result = pcall(fn, ""{safeJson}"")
+if not ok then return 'failed|lua_error|' .. tostring(result) end
+if result == nil or tostring(result) == '' then return 'applied|no_details|' end
+return tostring(result)
+end)())");
+
+            var raw = await ReadCvarValueAsync(ProjectionResultCvarName);
+            return ParseRuntimeProjectionApplyResult(raw);
+        }
+        finally
+        {
+            _cvarLock.Release();
+        }
+    }
+
+    private static RuntimeProjectionApplyResult ParseRuntimeProjectionApplyResult(string rawValue)
+    {
+        if (string.IsNullOrWhiteSpace(rawValue))
+            return new RuntimeProjectionApplyResult(
+                ProjectionApplyStatus.Failed,
+                "empty_runtime_result",
+                "Runtime did not return apply status.",
+                string.Empty);
+
+        var parts = rawValue.Split('|', 3, StringSplitOptions.None);
+        var statusToken = parts.Length > 0 ? parts[0].Trim() : string.Empty;
+        var code = parts.Length > 1 ? parts[1].Trim() : "none";
+        var message = parts.Length > 2 ? parts[2].Trim() : string.Empty;
+
+        if (!TryMapRuntimeStatus(statusToken, out var status))
+        {
+            return new RuntimeProjectionApplyResult(
+                ProjectionApplyStatus.Failed,
+                "invalid_runtime_status",
+                $"Unsupported runtime status token '{statusToken}'.",
+                rawValue);
+        }
+
+        return new RuntimeProjectionApplyResult(status, string.IsNullOrWhiteSpace(code) ? "none" : code, message, rawValue);
+    }
+
+    private static bool TryMapRuntimeStatus(string token, out ProjectionApplyStatus status)
+    {
+        switch (token.Trim().ToLowerInvariant())
+        {
+            case "applied":
+                status = ProjectionApplyStatus.Applied;
+                return true;
+            case "partial":
+            case "partially_applied":
+                status = ProjectionApplyStatus.PartiallyApplied;
+                return true;
+            case "not_applicable":
+            case "not_applied":
+                status = ProjectionApplyStatus.NotApplied;
+                return true;
+            case "failed":
+            case "failure":
+                status = ProjectionApplyStatus.Failed;
+                return true;
+            default:
+                status = ProjectionApplyStatus.Failed;
+                return false;
         }
     }
 
@@ -653,10 +746,27 @@ public partial class GameBridge(
         if (_sessionInvalidated)
             return;
 
+        try
+        {
+            var safeReason = EscapeLua(reason);
+            await ExecLuaAsync($"if KCD2MP_ClearRuntimeProjectionState then KCD2MP_ClearRuntimeProjectionState(\"{safeReason}\") end");
+        }
+        catch
+        {
+            // Runtime cleanup best effort only.
+        }
+
         _sessionInvalidated = true;
         _derivedState.MarkInvalidated(reason);
         _logger.Warning("[session] invalidated reason={Reason}", reason);
         await NotifyUserAsync(reason);
+    }
+
+    private async Task<string> ReadCvarValueAsync(string cvarName)
+    {
+        var xml = await _http.GetStringAsync($"{gameApiBase}/api/System/Console/GetCvarValue?name={cvarName}");
+        var match = CvarValueRegex().Match(xml);
+        return match.Success ? match.Groups[1].Value : string.Empty;
     }
 
     private async Task NotifyUserAsync(string message)

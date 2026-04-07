@@ -2359,37 +2359,83 @@ function KCD2MP_ApplyEquipment(ghostId, jsonStr)
     end)
 end
 
--- ===== Server-Driven State Projection (FT-020) =====
+-- ===== Server-Driven State Projection (FT-020 / FT-022) =====
 -- These handlers intentionally keep server state canonical:
 -- local runtime only reflects what is technically viable.
 KCD2MP.serverProjectionState = KCD2MP.serverProjectionState or {}
 
+local function _kcd2mp_projection_result(status, code, message)
+    local s = tostring(status or "failed")
+    local c = tostring(code or "none")
+    local m = tostring(message or "")
+    m = string.gsub(m, "|", "/")
+    return string.format("%s|%s|%s", s, c, m)
+end
+
+local function _kcd2mp_read_json_bool(jsonStr, key)
+    if not jsonStr or not key then return nil end
+    local pattern = '"' .. key .. '"%s*:%s*(true|false)'
+    local raw = jsonStr:match(pattern)
+    if raw == "true" then return true end
+    if raw == "false" then return false end
+    return nil
+end
+
 function KCD2MP_ApplySessionContext(jsonStr)
     KCD2MP.serverProjectionState.session = jsonStr
     local characterId = jsonStr:match('"characterId"%s*:%s*"([^"]+)"')
-    if characterId and characterId ~= "" then
-        pcall(function()
-            Game.SendInfoText("Session ready for character " .. characterId)
-        end)
+    if not characterId or characterId == "" then
+        return _kcd2mp_projection_result("not_applicable", "missing_character", "characterId is required")
     end
+
+    pcall(function()
+        Game.SendInfoText("Session ready for character " .. characterId)
+    end)
+    return _kcd2mp_projection_result("applied", "session_context_applied", "Character context accepted")
 end
 
 function KCD2MP_ApplyPresenceProjection(jsonStr)
     KCD2MP.serverProjectionState.presence = jsonStr
+    local mode = jsonStr:match('"mode"%s*:%s*"([^"]+)"')
+    local enabled = _kcd2mp_read_json_bool(jsonStr, "remotePresenceEnabled")
+    if mode and mode ~= "ghost_npc" then
+        return _kcd2mp_projection_result("partial", "presence_mode_limited", "Runtime currently supports ghost_npc mode")
+    end
+    if enabled == false then
+        return _kcd2mp_projection_result("not_applicable", "presence_disabled", "Remote presence disabled by projection")
+    end
+    return _kcd2mp_projection_result("applied", "presence_projection_applied", "Presence projection accepted")
 end
 
 function KCD2MP_ApplyLifecycleProjection(jsonStr)
     KCD2MP.serverProjectionState.lifecycle = jsonStr
     local defeatState = jsonStr:match('"defeatState"%s*:%s*"([^"]+)"')
-    if defeatState and defeatState ~= "" and defeatState ~= "Alive" then
-        pcall(function()
-            Game.SendInfoText("Server lifecycle state: " .. defeatState)
-        end)
+    if not defeatState or defeatState == "" then
+        return _kcd2mp_projection_result("not_applicable", "missing_defeat_state", "defeatState is required")
     end
+
+    if defeatState == "Alive" then
+        return _kcd2mp_projection_result("applied", "lifecycle_alive", "No local lifecycle transition required")
+    end
+
+    pcall(function()
+        Game.SendInfoText("Server lifecycle state: " .. defeatState)
+    end)
+
+    if defeatState == "Unconscious" or defeatState == "PendingRespawn" or defeatState == "Respawning" then
+        return _kcd2mp_projection_result("partial", "lifecycle_visual_only", "Lifecycle reflected as local informational state")
+    end
+
+    return _kcd2mp_projection_result("partial", "lifecycle_unknown_state", "Lifecycle state reflected with limited runtime mapping")
 end
 
 function KCD2MP_ApplyInventoryProjection(jsonStr)
     KCD2MP.serverProjectionState.inventory = jsonStr
+    local reflectable = _kcd2mp_read_json_bool(jsonStr, "reflectable")
+    if reflectable == false then
+        return _kcd2mp_projection_result("not_applicable", "inventory_not_reflectable", "Inventory projection marked as not reflectable")
+    end
+    return _kcd2mp_projection_result("partial", "inventory_summary_only", "Inventory canonical state is server-side; runtime stores summary")
 end
 
 function KCD2MP_ApplyCurrencyProjection(jsonStr)
@@ -2400,10 +2446,38 @@ function KCD2MP_ApplyCurrencyProjection(jsonStr)
             Game.SendInfoText("Server balance: " .. tostring(balance))
         end)
     end
+    if not balance then
+        return _kcd2mp_projection_result("not_applicable", "currency_missing_balance", "balance field not provided")
+    end
+    return _kcd2mp_projection_result("partial", "currency_visual_only", "Currency reflected as UI message only")
 end
 
 function KCD2MP_ApplyAdministrativeProjection(jsonStr)
     KCD2MP.serverProjectionState.administrative = jsonStr
+    local accessDenied = _kcd2mp_read_json_bool(jsonStr, "accessDenied")
+    local isBanned = _kcd2mp_read_json_bool(jsonStr, "isBanned")
+    local kicked = _kcd2mp_read_json_bool(jsonStr, "kicked")
+    local reason = jsonStr:match('"message"%s*:%s*"([^"]+)"') or "Administrative state updated."
+
+    if accessDenied or isBanned or kicked then
+        pcall(function()
+            KCD2MP_RemoveAllGhosts()
+            Game.SendInfoText(reason)
+        end)
+        return _kcd2mp_projection_result("applied", "administrative_invalidation_applied", "Runtime context cleaned after administrative invalidation")
+    end
+
+    return _kcd2mp_projection_result("applied", "administrative_projection_applied", "Administrative state stored")
+end
+
+function KCD2MP_ClearRuntimeProjectionState(reason)
+    local msg = reason or "Runtime context cleared."
+    pcall(function()
+        KCD2MP.serverProjectionState = {}
+        KCD2MP_RemoveAllGhosts()
+        Game.SendInfoText(msg)
+    end)
+    return _kcd2mp_projection_result("applied", "runtime_cleared", msg)
 end
 
 -- ===== NPC Damage Handler =====
