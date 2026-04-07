@@ -122,6 +122,7 @@ public class ClientSession
             _server.BroadcastName(this);
             _server.SendAllNamesTo(this);
             await _server.ProjectInitialStateAsync(SessionId);
+            _server.NotifyPresenceSessionReady(SessionId);
 
             // --- Position receive loop ---
             // Accepts both v1 (16 bytes: x,y,z,rotZ) and v2 (17 bytes: x,y,z,rotZ,flags)

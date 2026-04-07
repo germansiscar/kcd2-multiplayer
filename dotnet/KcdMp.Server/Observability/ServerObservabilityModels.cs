@@ -101,6 +101,13 @@ public enum ServerObservableEventType
     StateApplyPartial = 78,
     StateApplyFailed = 79,
     StateDesyncDetected = 80,
+    PresenceCreated = 81,
+    PresenceRemoved = 82,
+    PresenceRepresentationStarted = 83,
+    PresenceRepresentationPartial = 84,
+    PresenceRepresentationFailed = 85,
+    PresenceDesyncDetected = 86,
+    PresenceDesyncCorrected = 87,
 }
 
 public sealed record ServerObservableEvent(
