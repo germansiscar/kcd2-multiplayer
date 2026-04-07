@@ -2483,6 +2483,7 @@ function KCD2MP_ApplyPresenceProjection(jsonStr)
     KCD2MP.serverProjectionState.presence = jsonStr
     local mode = jsonStr:match('"mode"%s*:%s*"([^"]+)"')
     local enabled = _kcd2mp_read_json_bool(jsonStr, "remotePresenceEnabled")
+    local worldInitRequired = _kcd2mp_read_json_bool(jsonStr, "worldInitRequired")
     local revision = tonumber(jsonStr:match('"revision"%s*:%s*(%d+)')) or 0
     if mode and mode ~= "ghost_npc" then
         return _kcd2mp_projection_result("partial", "presence_mode_limited", "Runtime currently supports ghost_npc mode")
@@ -2492,6 +2493,15 @@ function KCD2MP_ApplyPresenceProjection(jsonStr)
             KCD2MP_RemoveAllGhosts()
         end)
         return _kcd2mp_projection_result("not_applicable", "presence_disabled", "Remote presence disabled by projection")
+    end
+    if worldInitRequired == nil then
+        worldInitRequired = true
+    end
+    if worldInitRequired and (not KCD2MP.serverProjectionState or not KCD2MP.serverProjectionState.worldInitCycleId) then
+        pcall(function()
+            KCD2MP_RemoveAllGhosts()
+        end)
+        return _kcd2mp_projection_result("not_applicable", "presence_blocked_world_init", "Presence blocked until world initialization completes")
     end
 
     local authoritativeGhostIds = {}

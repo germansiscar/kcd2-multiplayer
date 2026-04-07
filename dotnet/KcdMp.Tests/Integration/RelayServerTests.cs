@@ -226,6 +226,119 @@ public class RelayServerTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task PresenceProjection_IsBlockedUntilWorldInitializationCompletes()
+    {
+        const int port = TestPort + 10;
+        var root = Path.Combine(Path.GetTempPath(), $"kcdmp_relay_presence_gate_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        using var cts = new CancellationTokenSource();
+
+        var store = new JsonFilePersistenceStore(new JsonPersistenceOptions { BasePath = root });
+        var identities = new PlayerIdentityService(store, new NullServerObservabilitySink());
+        var characters = new CharacterProfileService(store, identities, new NullServerObservabilitySink());
+
+        var identity = await identities.ResolveOrCreateAsync(new PlayerIdentityClaim("GatePlayer", "token_gate", null), ServerAccessMode.Open);
+        var character = await characters.CreateAsync(identity.Identity!.InternalId, new CharacterCreateRequest("GateChar", "Skalitz", "knight"));
+
+        var server = new KcdMp.Server.RelayServer(
+            port,
+            password: TestPassword,
+            persistenceStore: store,
+            identityService: identities,
+            characterProfileService: characters,
+            characterBindingOptions: new CharacterSessionBindingOptions { RequireCharacterOnConnect = true });
+        var task = server.RunAsync(cts.Token);
+        await Task.Delay(200);
+
+        try
+        {
+            using var tcp = new TcpClient();
+            await tcp.ConnectAsync("127.0.0.1", port);
+            var stream = tcp.GetStream();
+            await stream.WriteAsync(PacketWriter.Auth(TestPassword));
+            Assert.True(PacketReader.ParseAuthResult((await stream.ReadPacketAsync()).Payload).ok);
+
+            var handshake = $$"""{"displayName":"GatePlayer","persistentToken":"token_gate","characterId":"{{character.Character!.InternalId}}"}""";
+            await stream.WriteAsync(PacketWriter.Handshake(handshake));
+            Assert.Equal(PacketType.Ack, (await stream.ReadPacketAsync()).Type);
+
+            var blockedPresenceSeen = false;
+            var worldInitCompleted = false;
+            using (var ctsHandshake = new CancellationTokenSource(TimeSpan.FromSeconds(5)))
+            {
+                while (!ctsHandshake.Token.IsCancellationRequested && (!blockedPresenceSeen || !worldInitCompleted))
+                {
+                    var packet = await stream.ReadPacketAsync(ctsHandshake.Token);
+                    if (packet.Type != PacketType.StateProjection)
+                        continue;
+
+                    var (projectionId, domainRaw, _, payload) = PacketReader.ParseStateProjection(packet.Payload);
+                    if (domainRaw == (byte)ProjectionDomain.Presence)
+                    {
+                        using var doc = JsonDocument.Parse(payload);
+                        var rootNode = doc.RootElement;
+                        if (rootNode.TryGetProperty("remotePresenceEnabled", out var enabledNode)
+                            && enabledNode.ValueKind == JsonValueKind.False
+                            && rootNode.TryGetProperty("reason", out var blockedReason)
+                            && string.Equals(blockedReason.GetString(), "world_init_pending", StringComparison.Ordinal))
+                        {
+                            blockedPresenceSeen = true;
+                        }
+                    }
+                    else if (domainRaw == (byte)ProjectionDomain.WorldInitialization && !worldInitCompleted)
+                    {
+                        var started = PacketWriter.StateProjectionResult(
+                            projectionId,
+                            domainRaw,
+                            (byte)ProjectionApplyStatus.Started,
+                            """{"message":"started"}"""u8.ToArray());
+                        await stream.WriteAsync(started, ctsHandshake.Token);
+
+                        var applied = PacketWriter.StateProjectionResult(
+                            projectionId,
+                            domainRaw,
+                            (byte)ProjectionApplyStatus.Applied,
+                            """{"message":"completed"}"""u8.ToArray());
+                        await stream.WriteAsync(applied, ctsHandshake.Token);
+                        worldInitCompleted = true;
+                    }
+                }
+            }
+
+            Assert.True(blockedPresenceSeen);
+            Assert.True(worldInitCompleted);
+
+            var enabledPresence = await WaitForPresenceProjectionAsync(
+                stream,
+                timeout: TimeSpan.FromSeconds(5),
+                predicate: rootNode =>
+                {
+                    if (!rootNode.TryGetProperty("remotePresenceEnabled", out var enabledNode)
+                        || enabledNode.ValueKind != JsonValueKind.True)
+                    {
+                        return false;
+                    }
+
+                    if (!rootNode.TryGetProperty("presences", out var presences) || presences.ValueKind != JsonValueKind.Array)
+                        return false;
+
+                    return presences.EnumerateArray().Any(x =>
+                        x.TryGetProperty("characterId", out var charNode)
+                        && string.Equals(charNode.GetString(), character.Character.InternalId, StringComparison.Ordinal));
+                });
+
+            Assert.True(enabledPresence.TryGetProperty("reason", out var enabledReason));
+            Assert.Equal("world_init_completed", enabledReason.GetString());
+        }
+        finally
+        {
+            cts.Cancel();
+            try { await task; } catch { }
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Client_WithSameIdentityFallbackName_IsRejectedWhenAlreadyConnected()
     {
         var (tcp1, _, _) = await ConnectClientAsync("SameName");
@@ -602,6 +715,7 @@ public class RelayServerTests : IAsyncLifetime
             var aliceHandshake = $$"""{"displayName":"Alice","persistentToken":"token_alice","characterId":"{{aliceCharacter.Character!.InternalId}}"}""";
             await streamAlice.WriteAsync(PacketWriter.Handshake(aliceHandshake));
             Assert.Equal(PacketType.Ack, (await streamAlice.ReadPacketAsync()).Type);
+            await CompleteWorldInitializationProjectionAsync(streamAlice, ProjectionApplyStatus.Applied);
 
             using var tcpBob = new TcpClient();
             await tcpBob.ConnectAsync("127.0.0.1", port);
@@ -611,6 +725,7 @@ public class RelayServerTests : IAsyncLifetime
             var bobHandshake = $$"""{"displayName":"Bob","persistentToken":"token_bob","characterId":"{{bobCharacter.Character!.InternalId}}"}""";
             await streamBob.WriteAsync(PacketWriter.Handshake(bobHandshake));
             Assert.Equal(PacketType.Ack, (await streamBob.ReadPacketAsync()).Type);
+            await CompleteWorldInitializationProjectionAsync(streamBob, ProjectionApplyStatus.Applied);
 
             var bobPresence = await WaitForPresenceProjectionAsync(
                 streamBob,
@@ -678,6 +793,7 @@ public class RelayServerTests : IAsyncLifetime
             var aliceHandshake = $$"""{"displayName":"Alice","persistentToken":"token_alice","characterId":"{{aliceCharacter.Character!.InternalId}}"}""";
             await streamAlice.WriteAsync(PacketWriter.Handshake(aliceHandshake));
             Assert.Equal(PacketType.Ack, (await streamAlice.ReadPacketAsync()).Type);
+            await CompleteWorldInitializationProjectionAsync(streamAlice, ProjectionApplyStatus.Applied);
 
             var tcpBob = new TcpClient();
             await tcpBob.ConnectAsync("127.0.0.1", port);
@@ -687,6 +803,7 @@ public class RelayServerTests : IAsyncLifetime
             var bobHandshake = $$"""{"displayName":"Bob","persistentToken":"token_bob","characterId":"{{bobCharacter.Character!.InternalId}}"}""";
             await streamBob.WriteAsync(PacketWriter.Handshake(bobHandshake));
             Assert.Equal(PacketType.Ack, (await streamBob.ReadPacketAsync()).Type);
+            await CompleteWorldInitializationProjectionAsync(streamBob, ProjectionApplyStatus.Applied);
 
             await WaitForPresenceProjectionAsync(
                 streamAlice,
@@ -815,6 +932,41 @@ public class RelayServerTests : IAsyncLifetime
         }
 
         throw new TimeoutException("Presence projection matching predicate not received within timeout.");
+    }
+
+    private static async Task CompleteWorldInitializationProjectionAsync(
+        NetworkStream stream,
+        ProjectionApplyStatus finalStatus,
+        TimeSpan? timeout = null)
+    {
+        using var cts = new CancellationTokenSource(timeout ?? TimeSpan.FromSeconds(5));
+        while (!cts.Token.IsCancellationRequested)
+        {
+            var packet = await stream.ReadPacketAsync(cts.Token);
+            if (packet.Type != PacketType.StateProjection)
+                continue;
+
+            var (projectionId, domainRaw, _, _) = PacketReader.ParseStateProjection(packet.Payload);
+            if (domainRaw != (byte)ProjectionDomain.WorldInitialization)
+                continue;
+
+            var started = PacketWriter.StateProjectionResult(
+                projectionId,
+                domainRaw,
+                (byte)ProjectionApplyStatus.Started,
+                """{"message":"started"}"""u8.ToArray());
+            await stream.WriteAsync(started, cts.Token);
+
+            var applied = PacketWriter.StateProjectionResult(
+                projectionId,
+                domainRaw,
+                (byte)finalStatus,
+                """{"message":"completed"}"""u8.ToArray());
+            await stream.WriteAsync(applied, cts.Token);
+            return;
+        }
+
+        throw new TimeoutException("World initialization projection not received for completion.");
     }
 
     private sealed class NullServerObservabilitySink : KcdMp.Server.Observability.IServerObservabilitySink
