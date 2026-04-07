@@ -44,6 +44,9 @@ public class RelayServer
     private readonly IServerObservabilitySink _observability;
     private readonly Dictionary<uint, PendingStateProjection> _pendingProjections = [];
     private uint _projectionCounter;
+    private long _presenceRevision;
+    private readonly Dictionary<Guid, PresenceSpatialSnapshot> _presenceSpatialBySession = [];
+    private readonly Dictionary<Guid, PresenceSnapshotEntry> _lastPresenceBySession = [];
 
     public RelayServer(
         int port,
@@ -232,7 +235,10 @@ public class RelayServer
                     _logger.Information("[-] {Client} disconnected. Clients: {ClientCount}. Reason: {CloseReason}. SessionId: {SessionId}",
                         session.Name ?? $"id={session.Id}", _clients.Count, session.CloseReason, session.SessionId);
                     if (session.IsReady)
+                    {
                         BroadcastDisconnect(session);
+                        _ = ProjectPresenceSnapshotToAllReadyAsync("session_closed", session.SessionId);
+                    }
                 });
 
                 lock (_lock)
@@ -280,12 +286,26 @@ public class RelayServer
     /// In echo mode also reflects the position back to the sender as ghost id=0.</summary>
     public void Broadcast(ClientSession source, float x, float y, float z, float rotZ, byte flags)
     {
+        if (!TryGetPresenceSourceSession(source, out var sourceSession))
+            return;
+
+        lock (_lock)
+        {
+            _presenceSpatialBySession[source.SessionId] = new PresenceSpatialSnapshot(
+                x,
+                y,
+                z,
+                rotZ,
+                IsRiding: (flags & 0x01) != 0,
+                UpdatedAtUtc: DateTimeOffset.UtcNow);
+        }
+
         List<ClientSession> targets;
         lock (_lock)
             targets = [.. _clients.Where(c => c != source && c.IsReady)];
 
         foreach (var target in targets)
-            target.EnqueueGhost(source.Id, x, y, z, rotZ, flags);
+            target.EnqueueGhost(sourceSession.TransportClientId!.Value, x, y, z, rotZ, flags);
 
         if (Echo)
         {
@@ -312,12 +332,54 @@ public class RelayServer
     /// <summary>Broadcasts a Disconnect (0x06) packet to all remaining clients so they can remove the ghost.</summary>
     public void BroadcastDisconnect(ClientSession disconnected)
     {
+        if (disconnected.IsReady)
+        {
+            lock (_lock)
+                _presenceSpatialBySession.Remove(disconnected.SessionId);
+        }
+
         List<ClientSession> targets;
         lock (_lock)
             targets = [.. _clients.Where(c => c.IsReady)];
 
         foreach (var target in targets)
             target.EnqueueDisconnect(disconnected.Id);
+    }
+
+    internal void NotifyPresenceSessionReady(Guid sessionId)
+    {
+        _ = ProjectPresenceSnapshotToAllReadyAsync("session_ready", sessionId);
+    }
+
+    private bool TryGetPresenceSourceSession(ClientSession source, out ServerSessionRecord session)
+    {
+        session = default!;
+        if (!source.IsReady)
+            return false;
+
+        var active = _sessionBackend.GetActiveSessions().FirstOrDefault(x => x.SessionId == source.SessionId);
+        if (active is null || active.TransportClientId is null)
+            return false;
+
+        if (!string.IsNullOrWhiteSpace(active.IdentityId) && !string.IsNullOrWhiteSpace(active.CharacterId))
+        {
+            session = active;
+            return true;
+        }
+
+        Emit(
+            ServerObservableEventType.PresenceDesyncDetected,
+            ServerObservableComponent.Session,
+            ServerObservableSeverity.Warning,
+            "Ignored position update from session without ready presence context.",
+            source.SessionId,
+            new Dictionary<string, object?>
+            {
+                ["transport_client_id"] = source.Id,
+                ["identity_id"] = active.IdentityId,
+                ["character_id"] = active.CharacterId,
+            });
+        return false;
     }
 
     /// <summary>Sends Name (0x03) packets of all currently ready clients to <paramref name="newClient"/>.</summary>
@@ -688,18 +750,11 @@ public class RelayServer
             },
             retryable: true);
 
-        SendStateProjection(
+        await SendPresenceProjectionToClientAsync(
             client,
             sessionId,
-            ProjectionDomain.Presence,
-            ProjectionApplicability.Direct,
-            new
-            {
-                mode = "ghost_npc",
-                projectionSource = "server",
-                remotePresenceEnabled = true,
-            },
-            retryable: true);
+            reason: "initial_state",
+            ct);
 
         SendStateProjection(
             client,
@@ -761,6 +816,200 @@ public class RelayServer
             retryable: true);
     }
 
+    private async Task ProjectPresenceSnapshotToAllReadyAsync(
+        string reason,
+        Guid? changedSessionId,
+        CancellationToken ct = default)
+    {
+        List<ClientSession> targets;
+        lock (_lock)
+            targets = [.. _clients.Where(x => x.IsReady)];
+
+        if (targets.Count == 0)
+            return;
+
+        var snapshot = await BuildPresenceSnapshotAsync(reason, changedSessionId, ct);
+        foreach (var client in targets)
+        {
+            SendStateProjection(
+                client,
+                client.SessionId,
+                ProjectionDomain.Presence,
+                ProjectionApplicability.Direct,
+                snapshot,
+                retryable: true);
+        }
+    }
+
+    private async Task SendPresenceProjectionToClientAsync(
+        ClientSession client,
+        Guid sessionId,
+        string reason,
+        CancellationToken ct = default)
+    {
+        var snapshot = await BuildPresenceSnapshotAsync(reason, sessionId, ct);
+        SendStateProjection(
+            client,
+            sessionId,
+            ProjectionDomain.Presence,
+            ProjectionApplicability.Direct,
+            snapshot,
+            retryable: true);
+    }
+
+    private async Task<object> BuildPresenceSnapshotAsync(
+        string reason,
+        Guid? changedSessionId,
+        CancellationToken ct)
+    {
+        var active = _sessionBackend
+            .GetActiveSessions()
+            .Where(IsPresenceVisibleSession)
+            .ToList();
+
+        var entries = new List<PresenceSnapshotEntry>(active.Count);
+        foreach (var session in active)
+        {
+            var displayName = ResolveDisplayName(session);
+            var state = await ResolvePresenceStateAsync(session, ct);
+
+            PresenceSpatialSnapshot? spatial;
+            lock (_lock)
+                _presenceSpatialBySession.TryGetValue(session.SessionId, out spatial);
+
+            entries.Add(new PresenceSnapshotEntry(
+                SessionId: session.SessionId,
+                TransportClientId: session.TransportClientId!.Value,
+                IdentityId: session.IdentityId!,
+                CharacterId: session.CharacterId!,
+                DisplayName: displayName,
+                PresenceState: state,
+                Spatial: spatial));
+        }
+
+        entries.Sort((a, b) => a.TransportClientId.CompareTo(b.TransportClientId));
+
+        long revision;
+        List<PresenceSnapshotEntry> created;
+        List<PresenceSnapshotEntry> removed;
+        lock (_lock)
+        {
+            _presenceRevision++;
+            revision = _presenceRevision;
+            created = entries.Where(x => !_lastPresenceBySession.ContainsKey(x.SessionId)).ToList();
+            removed = _lastPresenceBySession.Values.Where(x => entries.All(current => current.SessionId != x.SessionId)).ToList();
+            _lastPresenceBySession.Clear();
+            foreach (var entry in entries)
+                _lastPresenceBySession[entry.SessionId] = entry;
+        }
+
+        foreach (var entry in created)
+        {
+            Emit(
+                ServerObservableEventType.PresenceCreated,
+                ServerObservableComponent.Session,
+                ServerObservableSeverity.Information,
+                "Server presence entry created.",
+                entry.SessionId,
+                new Dictionary<string, object?>
+                {
+                    ["transport_client_id"] = entry.TransportClientId,
+                    ["identity_id"] = entry.IdentityId,
+                    ["character_id"] = entry.CharacterId,
+                    ["presence_state"] = entry.PresenceState,
+                });
+        }
+
+        foreach (var entry in removed)
+        {
+            Emit(
+                ServerObservableEventType.PresenceRemoved,
+                ServerObservableComponent.Session,
+                ServerObservableSeverity.Information,
+                "Server presence entry removed.",
+                entry.SessionId,
+                new Dictionary<string, object?>
+                {
+                    ["transport_client_id"] = entry.TransportClientId,
+                    ["identity_id"] = entry.IdentityId,
+                    ["character_id"] = entry.CharacterId,
+                });
+        }
+
+        return new
+        {
+            mode = "ghost_npc",
+            projectionSource = "server",
+            remotePresenceEnabled = true,
+            visibility = "global",
+            reason,
+            changedSessionId = changedSessionId?.ToString(),
+            revision,
+            presences = entries.Select(entry => new
+            {
+                sessionId = entry.SessionId.ToString(),
+                transportClientId = entry.TransportClientId,
+                identityId = entry.IdentityId,
+                characterId = entry.CharacterId,
+                displayName = entry.DisplayName,
+                presenceState = entry.PresenceState,
+                visibility = "visible",
+                lastKnownPosition = entry.Spatial is null
+                    ? null
+                    : new
+                    {
+                        x = entry.Spatial.X,
+                        y = entry.Spatial.Y,
+                        z = entry.Spatial.Z,
+                        rotZ = entry.Spatial.RotZ,
+                        isRiding = entry.Spatial.IsRiding,
+                        updatedAtUtc = entry.Spatial.UpdatedAtUtc,
+                    },
+            }),
+        };
+    }
+
+    private static bool IsPresenceVisibleSession(ServerSessionRecord session)
+    {
+        return session.State == ServerSessionState.Active
+               && session.ConnectionState == ServerSessionConnectionState.Connected
+               && session.AuthState == ServerSessionAuthState.Accepted
+               && session.TransportClientId is not null
+               && !string.IsNullOrWhiteSpace(session.IdentityId)
+               && !string.IsNullOrWhiteSpace(session.CharacterId);
+    }
+
+    private string ResolveDisplayName(ServerSessionRecord session)
+    {
+        lock (_lock)
+        {
+            if (_clientsBySessionId.TryGetValue(session.SessionId, out var client)
+                && !string.IsNullOrWhiteSpace(client.Name))
+            {
+                return client.Name!;
+            }
+        }
+
+        return $"Player-{session.TransportClientId}";
+    }
+
+    private async Task<string> ResolvePresenceStateAsync(ServerSessionRecord session, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(session.CharacterId))
+            return "not_visible";
+
+        var respawn = await _characterRespawnService.GetLoadedForSessionAsync(session.SessionId, ct);
+        if (respawn is null)
+            return "normal";
+
+        return respawn.State switch
+        {
+            CharacterDefeatState.Unconscious => "unconscious",
+            CharacterDefeatState.PendingRespawn => "respawn_pending",
+            _ => "normal",
+        };
+    }
+
     internal void RegisterStateProjectionResult(
         Guid sessionId,
         uint projectionId,
@@ -794,6 +1043,16 @@ public class RelayServer
                     "Client started applying server projection.",
                     sessionId,
                     payload);
+                if (domain == ProjectionDomain.Presence)
+                {
+                    Emit(
+                        ServerObservableEventType.PresenceRepresentationStarted,
+                        ServerObservableComponent.ClientIntegration,
+                        ServerObservableSeverity.Debug,
+                        "Client started applying presence projection.",
+                        sessionId,
+                        payload);
+                }
                 return;
 
             case ProjectionApplyStatus.Applied:
@@ -821,6 +1080,23 @@ public class RelayServer
                     "Projection partial apply indicates canonical/local mismatch.",
                     sessionId,
                     payload);
+                if (domain == ProjectionDomain.Presence)
+                {
+                    Emit(
+                        ServerObservableEventType.PresenceRepresentationPartial,
+                        ServerObservableComponent.ClientIntegration,
+                        ServerObservableSeverity.Warning,
+                        "Client partially applied presence projection.",
+                        sessionId,
+                        payload);
+                    Emit(
+                        ServerObservableEventType.PresenceDesyncDetected,
+                        ServerObservableComponent.ClientIntegration,
+                        ServerObservableSeverity.Warning,
+                        "Presence projection partial apply indicates mismatch.",
+                        sessionId,
+                        payload);
+                }
                 break;
 
             case ProjectionApplyStatus.NotApplied:
@@ -839,6 +1115,23 @@ public class RelayServer
                     "Projection apply failed and generated a desync incident.",
                     sessionId,
                     payload);
+                if (domain == ProjectionDomain.Presence)
+                {
+                    Emit(
+                        ServerObservableEventType.PresenceRepresentationFailed,
+                        ServerObservableComponent.ClientIntegration,
+                        ServerObservableSeverity.Warning,
+                        "Client failed to apply presence projection.",
+                        sessionId,
+                        payload);
+                    Emit(
+                        ServerObservableEventType.PresenceDesyncDetected,
+                        ServerObservableComponent.ClientIntegration,
+                        ServerObservableSeverity.Warning,
+                        "Presence projection apply failed and generated a desync incident.",
+                        sessionId,
+                        payload);
+                }
                 break;
         }
 
@@ -854,6 +1147,19 @@ public class RelayServer
 
         if (pending is null)
             return;
+
+        if (domain == ProjectionDomain.Presence
+            && status == ProjectionApplyStatus.Applied
+            && pending.Attempt > 0)
+        {
+            Emit(
+                ServerObservableEventType.PresenceDesyncCorrected,
+                ServerObservableComponent.ClientIntegration,
+                ServerObservableSeverity.Information,
+                "Presence projection desync corrected after retry.",
+                sessionId,
+                payload);
+        }
 
         if ((status is ProjectionApplyStatus.Failed or ProjectionApplyStatus.NotApplied)
             && pending.Attempt < pending.MaxRetries)
@@ -1234,6 +1540,23 @@ public class RelayServer
             Message: message,
             Payload: payload));
     }
+
+    private sealed record PresenceSpatialSnapshot(
+        float X,
+        float Y,
+        float Z,
+        float RotZ,
+        bool IsRiding,
+        DateTimeOffset UpdatedAtUtc);
+
+    private sealed record PresenceSnapshotEntry(
+        Guid SessionId,
+        byte TransportClientId,
+        string IdentityId,
+        string CharacterId,
+        string DisplayName,
+        string PresenceState,
+        PresenceSpatialSnapshot? Spatial);
 
     private sealed record PendingStateProjection(
         uint ProjectionId,

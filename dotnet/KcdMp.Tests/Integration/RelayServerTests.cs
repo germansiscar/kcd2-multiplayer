@@ -1,4 +1,5 @@
 using System.Net.Sockets;
+using System.Text.Json;
 using KcdMp.Server.AccessControl;
 using KcdMp.Server.Bans;
 using KcdMp.Server.Characters;
@@ -526,6 +527,173 @@ public class RelayServerTests : IAsyncLifetime
         }
     }
 
+    [Fact]
+    public async Task PresenceProjection_ContainsBothActiveCharacters_WhenTwoSessionsAreReady()
+    {
+        const int port = TestPort + 8;
+        var root = Path.Combine(Path.GetTempPath(), $"kcdmp_relay_presence_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        using var cts = new CancellationTokenSource();
+
+        var store = new JsonFilePersistenceStore(new JsonPersistenceOptions { BasePath = root });
+        var identities = new PlayerIdentityService(store, new NullServerObservabilitySink());
+        var characters = new CharacterProfileService(store, identities, new NullServerObservabilitySink());
+
+        var aliceIdentity = await identities.ResolveOrCreateAsync(new PlayerIdentityClaim("Alice", "token_alice", null), ServerAccessMode.Open);
+        var bobIdentity = await identities.ResolveOrCreateAsync(new PlayerIdentityClaim("Bob", "token_bob", null), ServerAccessMode.Open);
+        var aliceCharacter = await characters.CreateAsync(aliceIdentity.Identity!.InternalId, new CharacterCreateRequest("Alice", "Skalitz", "knight"));
+        var bobCharacter = await characters.CreateAsync(bobIdentity.Identity!.InternalId, new CharacterCreateRequest("Bob", "Talmberg", "archer"));
+
+        var server = new KcdMp.Server.RelayServer(
+            port,
+            password: TestPassword,
+            persistenceStore: store,
+            identityService: identities,
+            characterProfileService: characters,
+            characterBindingOptions: new CharacterSessionBindingOptions { RequireCharacterOnConnect = true });
+        var task = server.RunAsync(cts.Token);
+        await Task.Delay(200);
+
+        try
+        {
+            using var tcpAlice = new TcpClient();
+            await tcpAlice.ConnectAsync("127.0.0.1", port);
+            var streamAlice = tcpAlice.GetStream();
+            await streamAlice.WriteAsync(PacketWriter.Auth(TestPassword));
+            Assert.True(PacketReader.ParseAuthResult((await streamAlice.ReadPacketAsync()).Payload).ok);
+            var aliceHandshake = $$"""{"displayName":"Alice","persistentToken":"token_alice","characterId":"{{aliceCharacter.Character!.InternalId}}"}""";
+            await streamAlice.WriteAsync(PacketWriter.Handshake(aliceHandshake));
+            Assert.Equal(PacketType.Ack, (await streamAlice.ReadPacketAsync()).Type);
+
+            using var tcpBob = new TcpClient();
+            await tcpBob.ConnectAsync("127.0.0.1", port);
+            var streamBob = tcpBob.GetStream();
+            await streamBob.WriteAsync(PacketWriter.Auth(TestPassword));
+            Assert.True(PacketReader.ParseAuthResult((await streamBob.ReadPacketAsync()).Payload).ok);
+            var bobHandshake = $$"""{"displayName":"Bob","persistentToken":"token_bob","characterId":"{{bobCharacter.Character!.InternalId}}"}""";
+            await streamBob.WriteAsync(PacketWriter.Handshake(bobHandshake));
+            Assert.Equal(PacketType.Ack, (await streamBob.ReadPacketAsync()).Type);
+
+            var bobPresence = await WaitForPresenceProjectionAsync(
+                streamBob,
+                timeout: TimeSpan.FromSeconds(5),
+                predicate: rootNode =>
+                {
+                    if (!rootNode.TryGetProperty("presences", out var presences) || presences.ValueKind != JsonValueKind.Array)
+                        return false;
+
+                    var characterIds = presences
+                        .EnumerateArray()
+                        .Where(x => x.TryGetProperty("characterId", out _))
+                        .Select(x => x.GetProperty("characterId").GetString())
+                        .Where(x => !string.IsNullOrWhiteSpace(x))
+                        .ToHashSet(StringComparer.Ordinal);
+                    return characterIds.Contains(aliceCharacter.Character.InternalId)
+                           && characterIds.Contains(bobCharacter.Character.InternalId);
+                });
+
+            Assert.True(bobPresence.TryGetProperty("revision", out var revisionNode));
+            Assert.True(revisionNode.GetInt64() > 0);
+        }
+        finally
+        {
+            cts.Cancel();
+            try { await task; } catch { }
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PresenceProjection_RemovesDisconnectedCharacter_FromRemainingClient()
+    {
+        const int port = TestPort + 9;
+        var root = Path.Combine(Path.GetTempPath(), $"kcdmp_relay_presence_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        using var cts = new CancellationTokenSource();
+
+        var store = new JsonFilePersistenceStore(new JsonPersistenceOptions { BasePath = root });
+        var identities = new PlayerIdentityService(store, new NullServerObservabilitySink());
+        var characters = new CharacterProfileService(store, identities, new NullServerObservabilitySink());
+
+        var aliceIdentity = await identities.ResolveOrCreateAsync(new PlayerIdentityClaim("Alice", "token_alice", null), ServerAccessMode.Open);
+        var bobIdentity = await identities.ResolveOrCreateAsync(new PlayerIdentityClaim("Bob", "token_bob", null), ServerAccessMode.Open);
+        var aliceCharacter = await characters.CreateAsync(aliceIdentity.Identity!.InternalId, new CharacterCreateRequest("Alice", "Skalitz", "knight"));
+        var bobCharacter = await characters.CreateAsync(bobIdentity.Identity!.InternalId, new CharacterCreateRequest("Bob", "Talmberg", "archer"));
+
+        var server = new KcdMp.Server.RelayServer(
+            port,
+            password: TestPassword,
+            persistenceStore: store,
+            identityService: identities,
+            characterProfileService: characters,
+            characterBindingOptions: new CharacterSessionBindingOptions { RequireCharacterOnConnect = true });
+        var task = server.RunAsync(cts.Token);
+        await Task.Delay(200);
+
+        try
+        {
+            using var tcpAlice = new TcpClient();
+            await tcpAlice.ConnectAsync("127.0.0.1", port);
+            var streamAlice = tcpAlice.GetStream();
+            await streamAlice.WriteAsync(PacketWriter.Auth(TestPassword));
+            Assert.True(PacketReader.ParseAuthResult((await streamAlice.ReadPacketAsync()).Payload).ok);
+            var aliceHandshake = $$"""{"displayName":"Alice","persistentToken":"token_alice","characterId":"{{aliceCharacter.Character!.InternalId}}"}""";
+            await streamAlice.WriteAsync(PacketWriter.Handshake(aliceHandshake));
+            Assert.Equal(PacketType.Ack, (await streamAlice.ReadPacketAsync()).Type);
+
+            var tcpBob = new TcpClient();
+            await tcpBob.ConnectAsync("127.0.0.1", port);
+            var streamBob = tcpBob.GetStream();
+            await streamBob.WriteAsync(PacketWriter.Auth(TestPassword));
+            Assert.True(PacketReader.ParseAuthResult((await streamBob.ReadPacketAsync()).Payload).ok);
+            var bobHandshake = $$"""{"displayName":"Bob","persistentToken":"token_bob","characterId":"{{bobCharacter.Character!.InternalId}}"}""";
+            await streamBob.WriteAsync(PacketWriter.Handshake(bobHandshake));
+            Assert.Equal(PacketType.Ack, (await streamBob.ReadPacketAsync()).Type);
+
+            await WaitForPresenceProjectionAsync(
+                streamAlice,
+                timeout: TimeSpan.FromSeconds(5),
+                predicate: rootNode =>
+                {
+                    if (!rootNode.TryGetProperty("presences", out var presences) || presences.ValueKind != JsonValueKind.Array)
+                        return false;
+
+                    return presences.EnumerateArray().Any(x =>
+                        x.TryGetProperty("characterId", out var charNode)
+                        && charNode.GetString() == bobCharacter.Character.InternalId);
+                });
+
+            tcpBob.Dispose();
+
+            var updated = await WaitForPresenceProjectionAsync(
+                streamAlice,
+                timeout: TimeSpan.FromSeconds(5),
+                predicate: rootNode =>
+                {
+                    if (!rootNode.TryGetProperty("presences", out var presences) || presences.ValueKind != JsonValueKind.Array)
+                        return false;
+
+                    var characterIds = presences
+                        .EnumerateArray()
+                        .Where(x => x.TryGetProperty("characterId", out _))
+                        .Select(x => x.GetProperty("characterId").GetString())
+                        .Where(x => !string.IsNullOrWhiteSpace(x))
+                        .ToHashSet(StringComparer.Ordinal);
+                    return characterIds.Contains(aliceCharacter.Character.InternalId)
+                           && !characterIds.Contains(bobCharacter.Character.InternalId);
+                });
+
+            Assert.True(updated.TryGetProperty("reason", out var reasonNode));
+            Assert.Equal("session_closed", reasonNode.GetString());
+        }
+        finally
+        {
+            cts.Cancel();
+            try { await task; } catch { }
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     private async Task<(TcpClient tcp, NetworkStream stream, byte id)> ConnectClientAsync(string name)
     {
         var tcp = new TcpClient();
@@ -585,6 +753,30 @@ public class RelayServerTests : IAsyncLifetime
         }
 
         throw new TimeoutException("Administrative invalidation projection not received within timeout.");
+    }
+
+    private static async Task<JsonElement> WaitForPresenceProjectionAsync(
+        NetworkStream stream,
+        TimeSpan timeout,
+        Func<JsonElement, bool> predicate)
+    {
+        using var cts = new CancellationTokenSource(timeout);
+        while (!cts.Token.IsCancellationRequested)
+        {
+            var packet = await stream.ReadPacketAsync(cts.Token);
+            if (packet.Type != PacketType.StateProjection)
+                continue;
+
+            var (_, domainRaw, _, payload) = PacketReader.ParseStateProjection(packet.Payload);
+            if (domainRaw != (byte)ProjectionDomain.Presence)
+                continue;
+
+            using var doc = JsonDocument.Parse(payload);
+            if (predicate(doc.RootElement))
+                return doc.RootElement.Clone();
+        }
+
+        throw new TimeoutException("Presence projection matching predicate not received within timeout.");
     }
 
     private sealed class NullServerObservabilitySink : KcdMp.Server.Observability.IServerObservabilitySink

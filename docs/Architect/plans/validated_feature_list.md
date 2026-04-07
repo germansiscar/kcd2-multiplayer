@@ -475,3 +475,40 @@ Fecha de actualización: 2026-04-07
     - `dotnet/KcdMp.Tests/Client/ClientDerivedStateTests.cs`
   - tests de integracion actualizados:
     - `dotnet/KcdMp.Tests/Integration/RelayServerTests.cs` (ban en caliente proyecta estado administrativo antes del cierre)
+
+### F23 / FT-023 - Sincronizacion segura de presencia multiusuario (IMPLEMENTADA)
+
+- Estado: implementada en codigo + cubierta con tests de integracion.
+- Reutiliza del repo actual:
+  - `dotnet/KcdMp.Server/RelayServer.cs` como orquestador de sesiones activas y proyecciones.
+  - `dotnet/KcdMp.Client/GameBridge.cs` (FT-020/FT-021) para aplicar proyecciones de dominio `Presence`.
+  - `kdcmp/Data/Scripts/Startup/kdcmp.lua` (FT-022) para representar y limpiar ghosts en runtime.
+- Nueva implementacion:
+  - snapshot canonico de presencia (servidor) con:
+    - `revision` monotona
+    - lista de presencias visibles globalmente
+    - metadatos minimos por presencia (`transportClientId`, `identityId`, `characterId`, `displayName`, `presenceState`)
+    - posicion/rotacion conocidas cuando existen (`lastKnownPosition`)
+  - proyeccion de presencia emitida por servidor:
+    - al bootstrap inicial de sesion
+    - al entrar/salir una sesion valida (lifecycle de presencia)
+  - reconciliacion basica en runtime Lua:
+    - elimina ghosts locales fuera del snapshot canonico para evitar residuos/desalineacion
+  - validacion servidor-side para updates de posicion:
+    - se ignora posicion de sesiones sin contexto de presencia listo (identidad + personaje + transport id)
+  - observabilidad especifica de FT-023:
+    - `PresenceCreated`
+    - `PresenceRemoved`
+    - `PresenceRepresentationStarted`
+    - `PresenceRepresentationPartial`
+    - `PresenceRepresentationFailed`
+    - `PresenceDesyncDetected`
+    - `PresenceDesyncCorrected`
+- Refactor requerido:
+  - `ClientSession` notifica al servidor cuando la sesion entra en estado ready para refrescar el snapshot canonico.
+- Riesgo tecnico introducido:
+  - la reconciliacion en runtime se limita a limpieza de ghosts por id autorizado; no incluye interest management/proximidad en esta fase.
+  - el estado espacial proyectado es ultimo conocido por servidor y puede ser incompleto hasta recibir telemetria de posicion.
+- Evidencia:
+  - tests nuevos en:
+    - `dotnet/KcdMp.Tests/Integration/RelayServerTests.cs`

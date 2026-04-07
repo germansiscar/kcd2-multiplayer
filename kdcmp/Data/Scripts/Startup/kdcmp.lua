@@ -2398,13 +2398,47 @@ function KCD2MP_ApplyPresenceProjection(jsonStr)
     KCD2MP.serverProjectionState.presence = jsonStr
     local mode = jsonStr:match('"mode"%s*:%s*"([^"]+)"')
     local enabled = _kcd2mp_read_json_bool(jsonStr, "remotePresenceEnabled")
+    local revision = tonumber(jsonStr:match('"revision"%s*:%s*(%d+)')) or 0
     if mode and mode ~= "ghost_npc" then
         return _kcd2mp_projection_result("partial", "presence_mode_limited", "Runtime currently supports ghost_npc mode")
     end
     if enabled == false then
+        pcall(function()
+            KCD2MP_RemoveAllGhosts()
+        end)
         return _kcd2mp_projection_result("not_applicable", "presence_disabled", "Remote presence disabled by projection")
     end
-    return _kcd2mp_projection_result("applied", "presence_projection_applied", "Presence projection accepted")
+
+    local authoritativeGhostIds = {}
+    local authoritativeCount = 0
+    for idStr in string.gmatch(jsonStr, '"transportClientId"%s*:%s*(%d+)') do
+        local normalized = tostring(tonumber(idStr))
+        if normalized and normalized ~= "nil" and normalized ~= "0" and not authoritativeGhostIds[normalized] then
+            authoritativeGhostIds[normalized] = true
+            authoritativeCount = authoritativeCount + 1
+        end
+    end
+
+    local staleIds = {}
+    for ghostId, _ in pairs(KCD2MP.ghosts) do
+        local normalized = tostring(ghostId)
+        if normalized ~= "0" and not authoritativeGhostIds[normalized] then
+            staleIds[#staleIds + 1] = normalized
+        end
+    end
+
+    local removedCount = 0
+    for _, staleId in ipairs(staleIds) do
+        KCD2MP_RemoveGhost(staleId)
+        removedCount = removedCount + 1
+    end
+
+    KCD2MP.serverProjectionState.presenceRevision = revision
+    KCD2MP.serverProjectionState.presenceCount = authoritativeCount
+    return _kcd2mp_projection_result(
+        "applied",
+        "presence_projection_applied",
+        string.format("Presence revision=%d authoritative=%d cleaned=%d", revision, authoritativeCount, removedCount))
 end
 
 function KCD2MP_ApplyLifecycleProjection(jsonStr)
