@@ -52,6 +52,7 @@ public class RelayServer
     private long _presenceRevision;
     private readonly Dictionary<Guid, PresenceSpatialSnapshot> _presenceSpatialBySession = [];
     private readonly Dictionary<Guid, PresenceSnapshotEntry> _lastPresenceBySession = [];
+    private readonly HashSet<Guid> _presenceWorldReadySessions = [];
 
     public RelayServer(
         int port,
@@ -246,6 +247,8 @@ public class RelayServer
 
                     HandleCharacterLifecycleOnSessionClose(session.SessionId, session.CloseReason);
                     RemovePendingProjectionsForSession(session.SessionId);
+                    lock (_lock)
+                        _presenceWorldReadySessions.Remove(session.SessionId);
                     _sessionBackend.CloseSession(session.SessionId, session.CloseReason);
                     _logger.Information("[-] {Client} disconnected. Clients: {ClientCount}. Reason: {CloseReason}. SessionId: {SessionId}",
                         session.Name ?? $"id={session.Id}", _clients.Count, session.CloseReason, session.SessionId);
@@ -363,6 +366,13 @@ public class RelayServer
 
     internal void NotifyPresenceSessionReady(Guid sessionId)
     {
+        if (_worldInitEnabled && !IsPresenceWorldContextReady(sessionId))
+        {
+            EmitPresenceBlockedByWorldInit(sessionId, "session_ready_waiting_world_init");
+            _ = SendPresenceBlockedProjectionToClientAsync(sessionId, "world_init_pending");
+            return;
+        }
+
         _ = ProjectPresenceSnapshotToAllReadyAsync("session_ready", sessionId);
     }
 
@@ -378,6 +388,12 @@ public class RelayServer
 
         if (!string.IsNullOrWhiteSpace(active.IdentityId) && !string.IsNullOrWhiteSpace(active.CharacterId))
         {
+            if (_worldInitEnabled && !IsPresenceWorldContextReady(active.SessionId))
+            {
+                EmitPresenceBlockedByWorldInit(active.SessionId, "position_update_ignored_world_init_incomplete");
+                return false;
+            }
+
             session = active;
             return true;
         }
@@ -788,13 +804,17 @@ public class RelayServer
                 },
                 retryable: true,
                 maxRetries: _worldInitMaxRetries);
-        }
 
-        await SendPresenceProjectionToClientAsync(
-            client,
-            sessionId,
-            reason: "initial_state",
-            ct);
+            await SendPresenceBlockedProjectionToClientAsync(sessionId, "world_init_pending");
+        }
+        else
+        {
+            await SendPresenceProjectionToClientAsync(
+                client,
+                sessionId,
+                reason: "initial_state",
+                ct);
+        }
 
         SendStateProjection(
             client,
@@ -897,6 +917,39 @@ public class RelayServer
             retryable: true);
     }
 
+    private Task SendPresenceBlockedProjectionToClientAsync(
+        Guid sessionId,
+        string reason)
+    {
+        ClientSession? client;
+        lock (_lock)
+            _clientsBySessionId.TryGetValue(sessionId, out client);
+
+        if (client is null || !client.IsReady)
+            return Task.CompletedTask;
+
+        SendStateProjection(
+            client,
+            sessionId,
+            ProjectionDomain.Presence,
+            ProjectionApplicability.Direct,
+            new
+            {
+                mode = "ghost_npc",
+                projectionSource = "server",
+                remotePresenceEnabled = false,
+                visibility = "global",
+                reason,
+                changedSessionId = sessionId.ToString(),
+                revision = _presenceRevision,
+                worldInitRequired = _worldInitEnabled,
+                presences = Array.Empty<object>(),
+            },
+            retryable: false);
+
+        return Task.CompletedTask;
+    }
+
     private async Task<object> BuildPresenceSnapshotAsync(
         string reason,
         Guid? changedSessionId,
@@ -985,6 +1038,7 @@ public class RelayServer
             reason,
             changedSessionId = changedSessionId?.ToString(),
             revision,
+            worldInitRequired = _worldInitEnabled,
             presences = entries.Select(entry => new
             {
                 sessionId = entry.SessionId.ToString(),
@@ -1009,14 +1063,24 @@ public class RelayServer
         };
     }
 
-    private static bool IsPresenceVisibleSession(ServerSessionRecord session)
+    private bool IsPresenceVisibleSession(ServerSessionRecord session)
     {
         return session.State == ServerSessionState.Active
                && session.ConnectionState == ServerSessionConnectionState.Connected
                && session.AuthState == ServerSessionAuthState.Accepted
                && session.TransportClientId is not null
                && !string.IsNullOrWhiteSpace(session.IdentityId)
-               && !string.IsNullOrWhiteSpace(session.CharacterId);
+               && !string.IsNullOrWhiteSpace(session.CharacterId)
+               && IsPresenceWorldContextReady(session.SessionId);
+    }
+
+    private bool IsPresenceWorldContextReady(Guid sessionId)
+    {
+        if (!_worldInitEnabled)
+            return true;
+
+        lock (_lock)
+            return _presenceWorldReadySessions.Contains(sessionId);
     }
 
     private string ResolveDisplayName(ServerSessionRecord session)
@@ -1115,6 +1179,7 @@ public class RelayServer
                     payload);
                 if (domain == ProjectionDomain.WorldInitialization)
                 {
+                    MarkWorldInitializationReady(sessionId, isReady: true);
                     Emit(
                         ServerObservableEventType.WorldInitializationCompleted,
                         ServerObservableComponent.ClientIntegration,
@@ -1122,6 +1187,7 @@ public class RelayServer
                         "World initialization completed.",
                         sessionId,
                         payload);
+                    _ = ProjectPresenceSnapshotToAllReadyAsync("world_init_completed", sessionId);
                 }
                 break;
 
@@ -1157,6 +1223,11 @@ public class RelayServer
                         sessionId,
                         payload);
                 }
+                else if (domain == ProjectionDomain.WorldInitialization)
+                {
+                    MarkWorldInitializationReady(sessionId, isReady: true);
+                    _ = ProjectPresenceSnapshotToAllReadyAsync("world_init_partial", sessionId);
+                }
                 break;
 
             case ProjectionApplyStatus.NotApplied:
@@ -1170,6 +1241,7 @@ public class RelayServer
                     payload);
                 if (domain == ProjectionDomain.WorldInitialization)
                 {
+                    MarkWorldInitializationReady(sessionId, isReady: false);
                     Emit(
                         ServerObservableEventType.WorldInitializationFailed,
                         ServerObservableComponent.ClientIntegration,
@@ -1177,6 +1249,8 @@ public class RelayServer
                         "World initialization failed.",
                         sessionId,
                         payload);
+                    EmitPresenceBlockedByWorldInit(sessionId, "world_init_failed");
+                    _ = ProjectPresenceSnapshotToAllReadyAsync("world_init_failed", sessionId);
                 }
                 Emit(
                     ServerObservableEventType.StateDesyncDetected,
@@ -1473,6 +1547,36 @@ public class RelayServer
             foreach (var projectionId in stale)
                 _pendingProjections.Remove(projectionId);
         }
+    }
+
+    private void MarkWorldInitializationReady(Guid sessionId, bool isReady)
+    {
+        lock (_lock)
+        {
+            if (isReady)
+            {
+                _presenceWorldReadySessions.Add(sessionId);
+            }
+            else
+            {
+                _presenceWorldReadySessions.Remove(sessionId);
+            }
+        }
+    }
+
+    private void EmitPresenceBlockedByWorldInit(Guid sessionId, string reasonCode)
+    {
+        Emit(
+            ServerObservableEventType.PresenceDesyncDetected,
+            ServerObservableComponent.ClientIntegration,
+            ServerObservableSeverity.Warning,
+            "Presence projection blocked because world initialization is incomplete.",
+            sessionId,
+            new Dictionary<string, object?>
+            {
+                ["reason_code"] = reasonCode,
+                ["world_init_required"] = _worldInitEnabled,
+            });
     }
 
     private void HandleCharacterLifecycleOnSessionClose(Guid sessionId, ServerSessionCloseReason reason)
