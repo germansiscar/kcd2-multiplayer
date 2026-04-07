@@ -84,6 +84,7 @@ if (config.Mode == "host")
     Log.Information("Audit enabled: {Enabled} (retention days: {RetentionDays})", auditOptions.Enabled, auditOptions.RetentionDays);
     Log.Information("Currency initial balance: {Balance}", currencyOptions.InitialBalance);
     Log.Information("Respawn unconscious duration (s): {Duration}", respawnOptions.UnconsciousDuration.TotalSeconds);
+    Log.Information("Bootstrap admin identities: {Count}", config.AdminIdentityIds.Count);
 
     var server = new RelayServer(
         config.Port,
@@ -94,7 +95,8 @@ if (config.Mode == "host")
         characterCurrencyOptions: currencyOptions,
         characterRespawnOptions: respawnOptions,
         auditOptions: auditOptions,
-        observabilityOptions: observabilityOptions);
+        observabilityOptions: observabilityOptions,
+        bootstrapAdminIdentityIds: config.AdminIdentityIds);
     _ = server.RunAsync(cts.Token);
 
     await ClientLauncher.RunAsync(

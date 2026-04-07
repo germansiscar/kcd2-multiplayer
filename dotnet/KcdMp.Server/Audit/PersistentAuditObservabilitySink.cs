@@ -244,9 +244,12 @@ public sealed class PersistentAuditObservabilitySink : IServerObservabilitySink
             ServerObservableEventType.BanRevoked or
             ServerObservableEventType.BanExpired or
             ServerObservableEventType.BanAccessDenied or
-            ServerObservableEventType.BanSessionKicked => ServerAuditCategory.Access,
+            ServerObservableEventType.BanSessionKicked or
+            ServerObservableEventType.WhitelistApproved or
+            ServerObservableEventType.WhitelistRejected => ServerAuditCategory.Access,
 
             ServerObservableEventType.IdentityCreated => ServerAuditCategory.Identity,
+            ServerObservableEventType.IdentityRoleChanged => ServerAuditCategory.Identity,
 
             ServerObservableEventType.CharacterCreated or
             ServerObservableEventType.CharacterDeleted or
@@ -276,6 +279,9 @@ public sealed class PersistentAuditObservabilitySink : IServerObservabilitySink
             ServerObservableEventType.PersistenceSaveFailed or
             ServerObservableEventType.PersistenceLoadFailed => ServerAuditCategory.Persistence,
 
+            ServerObservableEventType.AdminSessionKicked => ServerAuditCategory.Access,
+            ServerObservableEventType.AdminAuditQueried => ServerAuditCategory.Access,
+
             ServerObservableEventType.BackendError => ServerAuditCategory.Error,
             _ => default,
         };
@@ -289,7 +295,10 @@ public sealed class PersistentAuditObservabilitySink : IServerObservabilitySink
             ServerObservableEventType.BanExpired or
             ServerObservableEventType.BanAccessDenied or
             ServerObservableEventType.BanSessionKicked or
+            ServerObservableEventType.WhitelistApproved or
+            ServerObservableEventType.WhitelistRejected or
             ServerObservableEventType.IdentityCreated or
+            ServerObservableEventType.IdentityRoleChanged or
             ServerObservableEventType.CharacterCreated or
             ServerObservableEventType.CharacterDeleted or
             ServerObservableEventType.CharacterStatusChanged or
@@ -313,6 +322,8 @@ public sealed class PersistentAuditObservabilitySink : IServerObservabilitySink
             ServerObservableEventType.RespawnSaveFailed or
             ServerObservableEventType.PersistenceSaveFailed or
             ServerObservableEventType.PersistenceLoadFailed or
+            ServerObservableEventType.AdminSessionKicked or
+            ServerObservableEventType.AdminAuditQueried or
             ServerObservableEventType.BackendError;
     }
 
@@ -322,6 +333,7 @@ public sealed class PersistentAuditObservabilitySink : IServerObservabilitySink
             ServerObservableEventType.AccessDecisionDenied or
             ServerObservableEventType.IdentityAccessDenied or
             ServerObservableEventType.BanAccessDenied or
+            ServerObservableEventType.WhitelistRejected or
             ServerObservableEventType.CharacterAccessDenied or
             ServerObservableEventType.CharacterLoadFailed or
             ServerObservableEventType.CharacterSaveFailed or
@@ -333,6 +345,7 @@ public sealed class PersistentAuditObservabilitySink : IServerObservabilitySink
             ServerObservableEventType.RespawnSaveFailed or
             ServerObservableEventType.PersistenceLoadFailed or
             ServerObservableEventType.PersistenceSaveFailed or
+            ServerObservableEventType.AdminSessionKicked or
             ServerObservableEventType.BackendError;
     }
 

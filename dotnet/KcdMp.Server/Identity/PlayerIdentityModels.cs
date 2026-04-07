@@ -12,6 +12,13 @@ public enum PlayerIdentityStatus
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter))]
+public enum PlayerIdentityRole
+{
+    Player = 0,
+    Admin = 1,
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter))]
 public enum PlayerIdentityExternalKind
 {
     SteamId = 0,
@@ -26,6 +33,7 @@ public sealed class PlayerIdentityRecord
     public PlayerIdentityExternalKind ExternalKind { get; set; } = PlayerIdentityExternalKind.PlayerNameFallback;
     public string ExternalKeyHash { get; set; } = "";
     public string DisplayName { get; set; } = "";
+    public PlayerIdentityRole Role { get; set; } = PlayerIdentityRole.Player;
     public List<string> CharacterIds { get; set; } = [];
     public bool IsDeactivated { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; }

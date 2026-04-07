@@ -90,6 +90,11 @@ public enum ServerObservableEventType
     BanExpired = 67,
     BanAccessDenied = 68,
     BanSessionKicked = 69,
+    WhitelistApproved = 70,
+    WhitelistRejected = 71,
+    IdentityRoleChanged = 72,
+    AdminSessionKicked = 73,
+    AdminAuditQueried = 74,
 }
 
 public sealed record ServerObservableEvent(

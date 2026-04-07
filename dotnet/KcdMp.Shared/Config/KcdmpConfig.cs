@@ -36,6 +36,7 @@ public class KcdmpConfig
     public bool ObservabilityIncludeSyncMicroEvents { get; set; } = false;
     public bool AuditEnabled { get; set; } = true;
     public int AuditRetentionDays { get; set; } = 30;
+    public List<string> AdminIdentityIds { get; set; } = [];
 
     public string ToJson() => JsonSerializer.Serialize(this, JsonOpts);
 

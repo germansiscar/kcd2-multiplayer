@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using KcdMp.Server.AccessControl;
+using KcdMp.Server.Admin;
 using KcdMp.Server.Audit;
 using KcdMp.Server.Bans;
 using KcdMp.Server.Characters;
@@ -33,7 +34,9 @@ public class RelayServer
     private readonly ICharacterCurrencyService _characterCurrencyService;
     private readonly ICharacterRespawnService _characterRespawnService;
     private readonly IInventoryRulesConfigurationService _inventoryRulesService;
+    private readonly IServerAdminService _adminService;
     private readonly Dictionary<Guid, ClientSession> _clientsBySessionId = [];
+    private readonly HashSet<string> _bootstrapAdminIdentityIds;
     private readonly object _lock = new();
     private readonly ILogger _logger;
     private readonly IServerObservabilitySink _observability;
@@ -67,12 +70,17 @@ public class RelayServer
         ICharacterInventoryService? characterInventoryService = null,
         ICharacterCurrencyService? characterCurrencyService = null,
         ICharacterRespawnService? characterRespawnService = null,
-        IInventoryRulesConfigurationService? inventoryRulesService = null)
+        IInventoryRulesConfigurationService? inventoryRulesService = null,
+        IReadOnlyCollection<string>? bootstrapAdminIdentityIds = null,
+        IServerAdminService? adminService = null)
     {
         _port = port;
         Echo = echo;
         Password = password;
         _logger = logger ?? Log.Logger;
+        _bootstrapAdminIdentityIds = bootstrapAdminIdentityIds is null
+            ? new HashSet<string>(StringComparer.Ordinal)
+            : new HashSet<string>(bootstrapAdminIdentityIds.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim()), StringComparer.Ordinal);
         _sessionBackend = new ServerSessionBackend(sessionIdleTimeout);
         _sessionBackend.LifecycleEventEmitted += HandleSessionLifecycleEvent;
         if (observability is not null)
@@ -141,10 +149,23 @@ public class RelayServer
                                        characterRespawnOptions,
                                        _inventoryRulesService,
                                        logger: _logger);
+        _adminService = adminService
+                        ?? new ServerAdminService(
+                            _identityService,
+                            _characterProfileService,
+                            _identityBanService,
+                            _observability,
+                            listSessions: () => _sessionBackend.GetActiveSessions(),
+                            kickSession: TryKickSessionById,
+                            applyBan: ApplyIdentityBanAsync,
+                            revokeBan: RevokeIdentityBanAsync,
+                            persistenceOptions: persistenceOptions,
+                            logger: _logger);
     }
 
     public bool Echo { get; }
     public string Password { get; }
+    public IServerAdminService Admin => _adminService;
 
     public async Task RunAsync(CancellationToken ct = default)
     {
@@ -341,6 +362,19 @@ public class RelayServer
     public IReadOnlyList<ServerSessionLifecycleEvent> GetSessionLifecycleEvents()
         => _sessionBackend.GetLifecycleEvents();
 
+    public bool TryKickSessionById(Guid sessionId)
+    {
+        ClientSession? client = null;
+        lock (_lock)
+            _clientsBySessionId.TryGetValue(sessionId, out client);
+
+        if (client is null)
+            return false;
+
+        client.RequestClose(ServerSessionCloseReason.AuthenticationRejected);
+        return true;
+    }
+
     internal void MarkSessionActivity(Guid sessionId)
         => _sessionBackend.TouchSession(sessionId);
 
@@ -360,6 +394,17 @@ public class RelayServer
         var resolved = await _identityService.ResolveOrCreateAsync(claim, accessConfig.AccessMode, ct);
         if (!resolved.IsAllowed || resolved.Identity is null)
             return (false, resolved.DenialReason ?? "Identity resolution failed.", null);
+
+        if (_bootstrapAdminIdentityIds.Contains(resolved.Identity.InternalId))
+        {
+            await _identityService.TrySetRoleAsync(resolved.Identity.InternalId, PlayerIdentityRole.Admin, ct);
+            await _identityService.TrySetStatusAsync(resolved.Identity.InternalId, PlayerIdentityStatus.Active, ct);
+            var refreshed = await _identityService.GetByInternalIdAsync(resolved.Identity.InternalId, ct);
+            if (refreshed is not null)
+            {
+                resolved = resolved with { Identity = refreshed };
+            }
+        }
 
         var banDecision = await _identityBanService.EvaluateAccessAsync(
             sessionId,

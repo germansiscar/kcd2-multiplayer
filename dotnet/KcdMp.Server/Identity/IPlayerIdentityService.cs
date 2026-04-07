@@ -16,4 +16,6 @@ public interface IPlayerIdentityService
     Task<bool> TrySetStatusAsync(string internalId, PlayerIdentityStatus status, CancellationToken ct = default);
 
     Task<bool> TryDeactivateAsync(string internalId, CancellationToken ct = default);
+
+    Task<bool> TrySetRoleAsync(string internalId, PlayerIdentityRole role, CancellationToken ct = default);
 }

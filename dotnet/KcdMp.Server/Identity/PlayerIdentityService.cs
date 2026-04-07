@@ -222,6 +222,45 @@ public sealed class PlayerIdentityService : IPlayerIdentityService
         return true;
     }
 
+    public async Task<bool> TrySetRoleAsync(string internalId, PlayerIdentityRole role, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(internalId);
+        var now = DateTimeOffset.UtcNow;
+        var changed = false;
+
+        await _gate.WaitAsync(ct);
+        try
+        {
+            var identity = await _store.LoadAsync<PlayerIdentityRecord>(JsonPersistenceDomains.Identity, internalId, ValidateIdentityRecord, ct);
+            if (identity is null)
+                return false;
+
+            if (identity.Role != role)
+            {
+                identity.Role = role;
+                identity.UpdatedAtUtc = now;
+                await _store.SaveAsync(JsonPersistenceDomains.Identity, identity.InternalId, identity, ct);
+                changed = true;
+            }
+        }
+        finally
+        {
+            _gate.Release();
+        }
+
+        if (changed)
+        {
+            Emit(
+                ServerObservableEventType.IdentityRoleChanged,
+                ServerObservableSeverity.Information,
+                "Player identity role changed.",
+                identityId: internalId,
+                payload: new Dictionary<string, object?> { ["role"] = role.ToString() });
+        }
+
+        return true;
+    }
+
     private async Task<PlayerIdentityLookupIndex> LoadLookupIndexAsync(CancellationToken ct)
     {
         var index = await _store.LoadAsync<PlayerIdentityLookupIndex>(
@@ -251,6 +290,7 @@ public sealed class PlayerIdentityService : IPlayerIdentityService
             ExternalKind = kind,
             ExternalKeyHash = externalLookupKey,
             DisplayName = displayName,
+            Role = PlayerIdentityRole.Player,
             CharacterIds = [],
             CreatedAtUtc = now,
             UpdatedAtUtc = now,
