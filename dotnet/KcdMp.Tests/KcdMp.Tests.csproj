@@ -22,6 +22,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\KcdMp.Client\KcdMp.Client.csproj" />
     <ProjectReference Include="..\KcdMp.Shared\KcdMp.Shared.csproj" />
     <ProjectReference Include="..\KcdMp.Server\KcdMp.Server.csproj" />
   </ItemGroup>

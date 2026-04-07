@@ -65,10 +65,12 @@ public partial class GameBridge(
 
     // Ping: maps sent timestamp (ticks) → Stopwatch timestamp at send time
     private readonly System.Collections.Concurrent.ConcurrentDictionary<long, long> _pingsSent = new();
+    private readonly ClientDerivedState _derivedState = new();
+    private volatile bool _sessionInvalidated;
 
     public async Task RunAsync(CancellationToken ct = default)
     {
-        while (!ct.IsCancellationRequested)
+        while (!ct.IsCancellationRequested && !_sessionInvalidated)
         {
             await WaitForGameAsync(ct);
             if (ct.IsCancellationRequested) break;
@@ -96,7 +98,7 @@ public partial class GameBridge(
     private async Task WaitForGameAsync(CancellationToken ct = default)
     {
         _logger.Information("Waiting for game to load a save...");
-        while (!ct.IsCancellationRequested)
+        while (!ct.IsCancellationRequested && !_sessionInvalidated)
         {
             try
             {
@@ -122,6 +124,8 @@ public partial class GameBridge(
     {
         using var tcp = new TcpClient();
         _isDead = false;
+        _sessionInvalidated = false;
+        _derivedState.BeginNewCycle();
 
         _logger.Information("Connecting to relay server {ServerHost}:{ServerPort}...", serverHost, serverPort);
         try
@@ -141,10 +145,19 @@ public partial class GameBridge(
         {
             await stream.WriteAsync(PacketWriter.Auth(password));
             var authResult = await stream.ReadPacketAsync();
+            if (authResult.Type != PacketType.AuthResult)
+            {
+                await InvalidateLocalSessionAsync("Invalid auth response from server.");
+                return;
+            }
+
             var (ok, message) = PacketReader.ParseAuthResult(authResult.Payload);
             if (!ok)
             {
                 _logger.Error("[!] Auth failed: {Message}", message);
+                await InvalidateLocalSessionAsync(string.IsNullOrWhiteSpace(message)
+                    ? "Authentication rejected by server."
+                    : message);
                 return;
             }
             _logger.Information("Authenticated.");
@@ -155,7 +168,26 @@ public partial class GameBridge(
 
         // --- Ack (S→C  0xFF [id:1]) ---
         var ackPacket = await stream.ReadPacketAsync();
+        if (ackPacket.Type == PacketType.AuthResult)
+        {
+            var (ok, message) = PacketReader.ParseAuthResult(ackPacket.Payload);
+            if (!ok)
+            {
+                await InvalidateLocalSessionAsync(string.IsNullOrWhiteSpace(message)
+                    ? "Access denied by server."
+                    : message);
+                return;
+            }
+        }
+
+        if (ackPacket.Type != PacketType.Ack || ackPacket.Payload.Length == 0)
+        {
+            await InvalidateLocalSessionAsync("Unexpected handshake response from server.");
+            return;
+        }
+
         byte myId = ackPacket.Payload[0];
+        _derivedState.SetTransportClientId(myId);
         _logger.Information("Connected! Assigned id={MyId}", myId);
 
         _hasPushed = false;
@@ -179,7 +211,7 @@ public partial class GameBridge(
             int tickCount = 0;
             long totalReadMs = 0;
 
-            while (tcp.Connected)
+            while (tcp.Connected && !_sessionInvalidated && !cts.IsCancellationRequested)
             {
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 var pos = await ReadPositionAsync();
@@ -208,7 +240,7 @@ public partial class GameBridge(
                     _logger.Information("[stat] avg read={AvgRead}ms over {TickCount} ticks",
                         totalReadMs / tickCount, tickCount);
 
-                await Task.Delay(TickMs);
+                await Task.Delay(TickMs, cts.Token);
             }
         }
         finally
@@ -220,6 +252,8 @@ public partial class GameBridge(
             try { await damageTask;   } catch { }
             _logger.Information("Removing all ghosts...");
             try { await ExecLuaAsync("KCD2MP_RemoveAllGhosts()"); } catch { }
+            if (!_sessionInvalidated && !appCt.IsCancellationRequested)
+                await InvalidateLocalSessionAsync("Session ended. Reconnecting...");
         }
     }
 
@@ -229,7 +263,7 @@ public partial class GameBridge(
 
     private async Task PingLoopAsync(NetworkStream stream, CancellationToken ct)
     {
-        while (!ct.IsCancellationRequested)
+        while (!ct.IsCancellationRequested && !_sessionInvalidated)
         {
             try
             {
@@ -436,7 +470,7 @@ public partial class GameBridge(
     {
         try
         {
-            while (!ct.IsCancellationRequested)
+            while (!ct.IsCancellationRequested && !_sessionInvalidated)
             {
                 var packet = await stream.ReadPacketAsync(ct);
 
@@ -508,6 +542,7 @@ public partial class GameBridge(
             ? (ProjectionApplicability)applicabilityRaw
             : ProjectionApplicability.NotApplicableYet;
         var json = Encoding.UTF8.GetString(jsonPayload);
+        _derivedState.MarkProjectionStarted(domain);
 
         await SendProjectionApplyStatusAsync(
             stream,
@@ -519,6 +554,7 @@ public partial class GameBridge(
 
         try
         {
+            ApplyDerivedStateProjection(domain, json);
             await ApplyProjectionDomainAsync(domain, json);
             var finalStatus = applicability switch
             {
@@ -526,11 +562,20 @@ public partial class GameBridge(
                 ProjectionApplicability.Partial => ProjectionApplyStatus.PartiallyApplied,
                 _ => ProjectionApplyStatus.NotApplied,
             };
+            _derivedState.MarkProjectionResult(domain, finalStatus);
             var details = $$"""{"message":"projection applied","domain":"{{domain}}","applicability":"{{applicability}}"}""";
             await SendProjectionApplyStatusAsync(stream, projectionId, domainRaw, finalStatus, details, CancellationToken.None);
+
+            if (finalStatus is ProjectionApplyStatus.PartiallyApplied or ProjectionApplyStatus.NotApplied)
+                await NotifyUserAsync($"Partial apply: {domain}");
+
+            var snapshot = _derivedState.Snapshot();
+            if (snapshot.IsInvalidated)
+                await InvalidateLocalSessionAsync(snapshot.InvalidationReason ?? "Session invalidated by server.");
         }
         catch (Exception ex)
         {
+            _derivedState.MarkProjectionResult(domain, ProjectionApplyStatus.Failed);
             var details = $$"""{"message":"projection apply failed","error":"{{EscapeJson(ex.Message)}}","domain":"{{domain}}"}""";
             await SendProjectionApplyStatusAsync(
                 stream,
@@ -539,6 +584,7 @@ public partial class GameBridge(
                 ProjectionApplyStatus.Failed,
                 details,
                 CancellationToken.None);
+            await NotifyUserAsync($"Projection failed: {domain}");
             _logger.Warning(ex, "[projection] apply failed id={ProjectionId} domain={Domain}", projectionId, domain);
         }
     }
@@ -586,6 +632,46 @@ public partial class GameBridge(
             default:
                 await ExecLuaAsync($"KCD2MP_ApplySessionContext(\"{safeJson}\")");
                 break;
+        }
+    }
+
+    private void ApplyDerivedStateProjection(ProjectionDomain domain, string json)
+    {
+        switch (domain)
+        {
+            case ProjectionDomain.SessionCharacter:
+                _derivedState.ApplySessionCharacterProjection(json);
+                break;
+            case ProjectionDomain.Administrative:
+                _derivedState.ApplyAdministrativeProjection(json);
+                break;
+        }
+    }
+
+    private async Task InvalidateLocalSessionAsync(string reason)
+    {
+        if (_sessionInvalidated)
+            return;
+
+        _sessionInvalidated = true;
+        _derivedState.MarkInvalidated(reason);
+        _logger.Warning("[session] invalidated reason={Reason}", reason);
+        await NotifyUserAsync(reason);
+    }
+
+    private async Task NotifyUserAsync(string message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+            return;
+
+        var safeMessage = EscapeLua(message.Trim());
+        try
+        {
+            await ExecLuaAsync($"Game.SendInfoText(\"{safeMessage}\")");
+        }
+        catch
+        {
+            // Client must keep running even when local UI messaging is unavailable.
         }
     }
 

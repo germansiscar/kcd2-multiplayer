@@ -443,3 +443,35 @@ Fecha de actualización: 2026-04-07
   - tests actualizados/nuevos en:
     - `dotnet/KcdMp.Tests/Protocol/StateEventPacketTests.cs`
     - `dotnet/KcdMp.Tests/Integration/RelayServerTests.cs`
+
+### F21 / FT-021 - Adaptacion de cliente a identidad/personaje persistentes (IMPLEMENTADA)
+
+- Estado: implementada en codigo + cubierta con tests.
+- Reutiliza del repo actual:
+  - `dotnet/KcdMp.Client/GameBridge.cs` (FT-020) para consumo de `StateProjection`.
+  - `dotnet/KcdMp.Server/RelayServer.cs` para proyecciones administrativas y contexto inicial.
+  - `dotnet/KcdMp.Shared/Protocol/` para dominios/status de proyeccion.
+- Nueva implementacion:
+  - estado derivado explicito del cliente en `dotnet/KcdMp.Client/ClientDerivedState.cs`:
+    - `session_id`, `identity_id`, `character_id`, `readiness`
+    - estado administrativo (`accessMode`, `identityStatus`, `characterStatus`, ban/kick/accessDenied)
+    - fase de adaptacion (`Pending`, `Partial`, `Complete`, `Error`)
+  - `GameBridge` ahora:
+    - valida respuestas de auth/handshake (incluyendo rechazo por `AuthResult`)
+    - inicia cada reconexion como ciclo nuevo (`BeginNewCycle`)
+    - marca y reporta estado de aplicacion por dominio
+    - limpia flujo local por invalidacion y muestra mensajeria resumida
+    - tolera aplicacion parcial/fallida sin promover canon local
+  - `RelayServer` ahora proyecta:
+    - `readiness` y `characterStatus` en contexto inicial
+    - proyeccion administrativa de invalidacion en kick/ban antes de cierre de sesion
+- Refactor requerido:
+  - `KcdMp.Tests` referencia tambien `KcdMp.Client` para validar estado derivado.
+- Riesgo tecnico introducido:
+  - la notificacion de invalidacion previa al cierre depende del flush de red del canal activo (best-effort).
+  - la adaptacion del runtime Lua profundo permanece fuera de FT-021 (queda en FT-022).
+- Evidencia:
+  - tests nuevos en:
+    - `dotnet/KcdMp.Tests/Client/ClientDerivedStateTests.cs`
+  - tests de integracion actualizados:
+    - `dotnet/KcdMp.Tests/Integration/RelayServerTests.cs` (ban en caliente proyecta estado administrativo antes del cierre)

@@ -376,6 +376,14 @@ public class RelayServer
         if (client is null)
             return false;
 
+        SendAdministrativeInvalidationProjection(
+            client,
+            sessionId,
+            reasonCode: "kicked",
+            message: "Session closed by server administration.",
+            accessDenied: true,
+            isBanned: false,
+            kicked: true);
         client.RequestClose(ServerSessionCloseReason.AuthenticationRejected);
         return true;
     }
@@ -657,6 +665,9 @@ public class RelayServer
         var identity = !string.IsNullOrWhiteSpace(session.IdentityId)
             ? await _identityService.GetByInternalIdAsync(session.IdentityId!, ct)
             : null;
+        var character = !string.IsNullOrWhiteSpace(session.CharacterId)
+            ? await _characterProfileService.GetByInternalIdAsync(session.CharacterId!, ct)
+            : null;
         var inventory = await _characterInventoryService.GetLoadedForSessionAsync(sessionId, ct);
         var currency = await _characterCurrencyService.GetLoadedForSessionAsync(sessionId, ct);
         var respawn = await _characterRespawnService.GetLoadedForSessionAsync(sessionId, ct);
@@ -673,6 +684,7 @@ public class RelayServer
                 identityId = session.IdentityId,
                 characterId = session.CharacterId,
                 displayName = client.Name,
+                readiness = "Ready",
             },
             retryable: true);
 
@@ -741,6 +753,10 @@ public class RelayServer
                 accessMode = accessConfig.AccessMode.ToString(),
                 identityRole = identity?.Role.ToString() ?? PlayerIdentityRole.Player.ToString(),
                 identityStatus = identity?.Status.ToString() ?? PlayerIdentityStatus.Active.ToString(),
+                characterStatus = character?.Status.ToString() ?? CharacterProfileStatus.Active.ToString(),
+                accessDenied = false,
+                isBanned = false,
+                kicked = false,
             },
             retryable: true);
     }
@@ -864,6 +880,15 @@ public class RelayServer
 
             if (client is not null)
             {
+                SendAdministrativeInvalidationProjection(
+                    client,
+                    activeSessionId,
+                    reasonCode: "ban",
+                    message: request.Summary ?? "You are banned from this server.",
+                    accessDenied: true,
+                    isBanned: true,
+                    kicked: true);
+                await Task.Delay(100, ct);
                 client.RequestClose(ServerSessionCloseReason.AuthenticationRejected);
                 Emit(
                     ServerObservableEventType.BanSessionKicked,
@@ -938,6 +963,31 @@ public class RelayServer
                 ["applicability"] = applicability.ToString(),
                 ["retryable"] = retryable,
             });
+    }
+
+    private void SendAdministrativeInvalidationProjection(
+        ClientSession client,
+        Guid sessionId,
+        string reasonCode,
+        string message,
+        bool accessDenied,
+        bool isBanned,
+        bool kicked)
+    {
+        SendStateProjection(
+            client,
+            sessionId,
+            ProjectionDomain.Administrative,
+            ProjectionApplicability.Direct,
+            new
+            {
+                reasonCode,
+                message,
+                accessDenied,
+                isBanned,
+                kicked,
+            },
+            retryable: false);
     }
 
     private void ScheduleProjectionRetry(

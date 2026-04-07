@@ -507,6 +507,10 @@ public class RelayServerTests : IAsyncLifetime
                 Summary: "Disconnected by moderation."));
             Assert.True(apply.Applied);
 
+            var adminJson = await ReadAdministrativeInvalidationProjectionAsync(stream, TimeSpan.FromSeconds(2));
+            Assert.Contains("\"isBanned\":true", adminJson, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("\"accessDenied\":true", adminJson, StringComparison.OrdinalIgnoreCase);
+
             await Task.Delay(250);
             Assert.Empty(server.GetActiveSessions());
             Assert.Contains(
@@ -560,6 +564,27 @@ public class RelayServerTests : IAsyncLifetime
         }
 
         throw new TimeoutException($"Packet type {expectedType} not received within timeout.");
+    }
+
+    private static async Task<string> ReadAdministrativeInvalidationProjectionAsync(NetworkStream stream, TimeSpan timeout)
+    {
+        using var cts = new CancellationTokenSource(timeout);
+        while (!cts.Token.IsCancellationRequested)
+        {
+            var packet = await stream.ReadPacketAsync(cts.Token);
+            if (packet.Type != PacketType.StateProjection)
+                continue;
+
+            var (_, domainRaw, _, payload) = PacketReader.ParseStateProjection(packet.Payload);
+            if (domainRaw != (byte)ProjectionDomain.Administrative)
+                continue;
+
+            var json = System.Text.Encoding.UTF8.GetString(payload);
+            if (json.Contains("\"isBanned\":true", StringComparison.OrdinalIgnoreCase))
+                return json;
+        }
+
+        throw new TimeoutException("Administrative invalidation projection not received within timeout.");
     }
 
     private sealed class NullServerObservabilitySink : KcdMp.Server.Observability.IServerObservabilitySink
