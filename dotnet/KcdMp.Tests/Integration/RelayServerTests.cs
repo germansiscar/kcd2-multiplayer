@@ -188,6 +188,44 @@ public class RelayServerTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Client_ReceivesWorldInitializationProjection_DuringInitialState()
+    {
+        using var tcp = new TcpClient();
+        await tcp.ConnectAsync("127.0.0.1", TestPort);
+        var stream = tcp.GetStream();
+
+        await stream.WriteAsync(PacketWriter.Auth(TestPassword));
+        var authResponse = await stream.ReadPacketAsync();
+        Assert.Equal(PacketType.AuthResult, authResponse.Type);
+        Assert.True(PacketReader.ParseAuthResult(authResponse.Payload).ok);
+
+        await stream.WriteAsync(PacketWriter.Handshake("WorldInitPlayer"));
+        var ackPacket = await stream.ReadPacketAsync();
+        Assert.Equal(PacketType.Ack, ackPacket.Type);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        while (!cts.Token.IsCancellationRequested)
+        {
+            var packet = await stream.ReadPacketAsync(cts.Token);
+            if (packet.Type != PacketType.StateProjection)
+                continue;
+
+            var (_, domainRaw, _, payload) = PacketReader.ParseStateProjection(packet.Payload);
+            if (domainRaw != (byte)ProjectionDomain.WorldInitialization)
+                continue;
+
+            using var doc = JsonDocument.Parse(payload);
+            var root = doc.RootElement;
+            Assert.True(root.TryGetProperty("cycleId", out _));
+            Assert.True(root.TryGetProperty("criticalInventoryCleanup", out _));
+            Assert.True(root.TryGetProperty("criticalNpcCleanup", out _));
+            return;
+        }
+
+        throw new TimeoutException("World initialization projection was not received.");
+    }
+
+    [Fact]
     public async Task Client_WithSameIdentityFallbackName_IsRejectedWhenAlreadyConnected()
     {
         var (tcp1, _, _) = await ConnectClientAsync("SameName");

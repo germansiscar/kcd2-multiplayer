@@ -648,6 +648,8 @@ public partial class GameBridge(
                 return await InvokeRuntimeProjectionApplyAsync("KCD2MP_ApplyCurrencyProjection", safeJson);
             case ProjectionDomain.Administrative:
                 return await InvokeRuntimeProjectionApplyAsync("KCD2MP_ApplyAdministrativeProjection", safeJson);
+            case ProjectionDomain.WorldInitialization:
+                return await InvokeRuntimeProjectionApplyAsync("KCD2MP_ApplyWorldInitialization", safeJson);
             default:
                 return await InvokeRuntimeProjectionApplyAsync("KCD2MP_ApplySessionContext", safeJson);
         }

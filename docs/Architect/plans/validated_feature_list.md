@@ -512,3 +512,40 @@ Fecha de actualización: 2026-04-07
 - Evidencia:
   - tests nuevos en:
     - `dotnet/KcdMp.Tests/Integration/RelayServerTests.cs`
+
+### F29 / FT-029 - Inicializacion de mundo y override de save local (IMPLEMENTADA)
+
+- Estado: implementada en codigo + cubierta con tests de integracion/config.
+- Reutiliza del repo actual:
+  - `dotnet/KcdMp.Server/RelayServer.cs` (FT-020/FT-023) para proyeccion server-driven + retry.
+  - `dotnet/KcdMp.Client/GameBridge.cs` (FT-021/FT-022) para aplicar dominios proyectados en runtime.
+  - `kdcmp/Data/Scripts/Startup/kdcmp.lua` para ejecutar limpieza local dentro de capacidades verificadas.
+- Nueva implementacion:
+  - nuevo dominio de proyeccion `ProjectionDomain.WorldInitialization`.
+  - proyeccion inicial de world bootstrap por sesion con:
+    - `cycleId` por ciclo de entrada
+    - flags de criticidad por paso
+    - politica de `skillsPerksMode` configurable (`pending` por defecto)
+    - politica de reejecucion por carga de zona (`reapplyOnZoneLoad`)
+  - runtime Lua:
+    - handler `KCD2MP_ApplyWorldInitialization(...)`
+    - limpieza de NPCs originales cercanos preservando entidades MP
+    - limpieza de inventario heredado y limpieza/equipamiento local best-effort
+    - marcador de ciclo aplicado para evitar repeticion accidental
+    - reejecucion segura en `Player.Client.OnInit` para cambio de zona/reentrada local
+  - bloqueo por fallo critico:
+    - retry controlado por servidor
+    - invalidacion administrativa + cierre de sesion si falla world init tras reintentos
+  - observabilidad extendida:
+    - `WorldInitializationStarted`
+    - `WorldInitializationCompleted`
+    - `WorldInitializationFailed`
+    - `WorldInitializationBlocked`
+- Refactor requerido:
+  - extensiones aditivas en `KcdmpConfig` para politicas de world init y wiring en `KcdMp.App/Program.cs`.
+- Riesgo tecnico introducido:
+  - limpieza de skills/perks y reset monetario completo siguen condicionados por capacidades de runtime no verificadas; quedan en modo `pending` por defecto para no inventar APIs.
+- Evidencia:
+  - tests nuevos/actualizados en:
+    - `dotnet/KcdMp.Tests/Integration/RelayServerTests.cs`
+    - `dotnet/KcdMp.Tests/Config/KcdmpConfigTests.cs`
