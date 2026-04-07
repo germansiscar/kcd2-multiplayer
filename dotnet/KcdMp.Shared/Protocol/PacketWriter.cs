@@ -111,6 +111,34 @@ public static class PacketWriter
         return Build(PacketType.EventRelay, buf);
     }
 
+    public static byte[] StateProjection(
+        uint projectionId,
+        byte domain,
+        byte applicability,
+        byte[] jsonPayload)
+    {
+        var buf = new byte[6 + jsonPayload.Length];
+        BinaryPrimitives.WriteUInt32LittleEndian(buf.AsSpan(0, 4), projectionId);
+        buf[4] = domain;
+        buf[5] = applicability;
+        Buffer.BlockCopy(jsonPayload, 0, buf, 6, jsonPayload.Length);
+        return Build(PacketType.StateProjection, buf);
+    }
+
+    public static byte[] StateProjectionResult(
+        uint projectionId,
+        byte domain,
+        byte status,
+        byte[] detailsPayload)
+    {
+        var buf = new byte[6 + detailsPayload.Length];
+        BinaryPrimitives.WriteUInt32LittleEndian(buf.AsSpan(0, 4), projectionId);
+        buf[4] = domain;
+        buf[5] = status;
+        Buffer.BlockCopy(detailsPayload, 0, buf, 6, detailsPayload.Length);
+        return Build(PacketType.StateProjectionResult, buf);
+    }
+
     public static void WriteFloat(byte[] buf, int offset, float value)
         => BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(offset), BitConverter.SingleToInt32Bits(value));
 }

@@ -2359,6 +2359,53 @@ function KCD2MP_ApplyEquipment(ghostId, jsonStr)
     end)
 end
 
+-- ===== Server-Driven State Projection (FT-020) =====
+-- These handlers intentionally keep server state canonical:
+-- local runtime only reflects what is technically viable.
+KCD2MP.serverProjectionState = KCD2MP.serverProjectionState or {}
+
+function KCD2MP_ApplySessionContext(jsonStr)
+    KCD2MP.serverProjectionState.session = jsonStr
+    local characterId = jsonStr:match('"characterId"%s*:%s*"([^"]+)"')
+    if characterId and characterId ~= "" then
+        pcall(function()
+            Game.SendInfoText("Session ready for character " .. characterId)
+        end)
+    end
+end
+
+function KCD2MP_ApplyPresenceProjection(jsonStr)
+    KCD2MP.serverProjectionState.presence = jsonStr
+end
+
+function KCD2MP_ApplyLifecycleProjection(jsonStr)
+    KCD2MP.serverProjectionState.lifecycle = jsonStr
+    local defeatState = jsonStr:match('"defeatState"%s*:%s*"([^"]+)"')
+    if defeatState and defeatState ~= "" and defeatState ~= "Alive" then
+        pcall(function()
+            Game.SendInfoText("Server lifecycle state: " .. defeatState)
+        end)
+    end
+end
+
+function KCD2MP_ApplyInventoryProjection(jsonStr)
+    KCD2MP.serverProjectionState.inventory = jsonStr
+end
+
+function KCD2MP_ApplyCurrencyProjection(jsonStr)
+    KCD2MP.serverProjectionState.currency = jsonStr
+    local balance = jsonStr:match('"balance"%s*:%s*(-?%d+)')
+    if balance then
+        pcall(function()
+            Game.SendInfoText("Server balance: " .. tostring(balance))
+        end)
+    end
+end
+
+function KCD2MP_ApplyAdministrativeProjection(jsonStr)
+    KCD2MP.serverProjectionState.administrative = jsonStr
+end
+
 -- ===== NPC Damage Handler =====
 -- Called from C# when partner damages an NPC in their game
 function KCD2MP_HandleNpcDamage(entityName, amount)

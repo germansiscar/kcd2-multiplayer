@@ -15,5 +15,7 @@ public enum PacketType : byte
     EventRelay   = 0x0A,
     Auth         = 0x0B,
     AuthResult   = 0x0C,
+    StateProjection = 0x0D,
+    StateProjectionResult = 0x0E,
     Ack          = 0xFF,
 }

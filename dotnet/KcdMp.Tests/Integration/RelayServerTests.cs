@@ -114,8 +114,7 @@ public class RelayServerTests : IAsyncLifetime
         await s1.WriteAsync(statePacket);
 
         // Client 2 should receive StateSync
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-        var packet = await s2.ReadPacketAsync(cts.Token);
+        var packet = await ReadPacketByTypeAsync(s2, PacketType.StateSync, TimeSpan.FromSeconds(2));
         Assert.Equal(PacketType.StateSync, packet.Type);
         var (srcId, parsedType, payload) = PacketReader.ParseStateSync(packet.Payload);
         Assert.Equal(id1, srcId);
@@ -142,13 +141,49 @@ public class RelayServerTests : IAsyncLifetime
         await s1.WriteAsync(eventPacket);
 
         // Client 2 should receive EventRelay
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-        var packet = await s2.ReadPacketAsync(cts.Token);
+        var packet = await ReadPacketByTypeAsync(s2, PacketType.EventRelay, TimeSpan.FromSeconds(2));
         Assert.Equal(PacketType.EventRelay, packet.Type);
         var (srcId, parsedEvt, parsedJson) = PacketReader.ParseEventRelay(packet.Payload);
         Assert.Equal(id1, srcId);
         Assert.Equal(eventType, parsedEvt);
         Assert.Equal(json, parsedJson);
+    }
+
+    [Fact]
+    public async Task Client_ReceivesInitialStateProjection_AndCanReportApplyResult()
+    {
+        using var tcp = new TcpClient();
+        await tcp.ConnectAsync("127.0.0.1", TestPort);
+        var stream = tcp.GetStream();
+
+        await stream.WriteAsync(PacketWriter.Auth(TestPassword));
+        var authResponse = await stream.ReadPacketAsync();
+        Assert.Equal(PacketType.AuthResult, authResponse.Type);
+        Assert.True(PacketReader.ParseAuthResult(authResponse.Payload).ok);
+
+        await stream.WriteAsync(PacketWriter.Handshake("ProjectionPlayer"));
+        var ackPacket = await stream.ReadPacketAsync();
+        Assert.Equal(PacketType.Ack, ackPacket.Type);
+
+        var projectionPacket = await ReadPacketByTypeAsync(stream, PacketType.StateProjection, TimeSpan.FromSeconds(2));
+        var (projectionId, domain, _, _) = PacketReader.ParseStateProjection(projectionPacket.Payload);
+        var started = PacketWriter.StateProjectionResult(
+            projectionId,
+            domain,
+            (byte)ProjectionApplyStatus.Started,
+            """{"message":"started"}"""u8.ToArray());
+        await stream.WriteAsync(started);
+        var applied = PacketWriter.StateProjectionResult(
+            projectionId,
+            domain,
+            (byte)ProjectionApplyStatus.Applied,
+            """{"message":"applied"}"""u8.ToArray());
+        await stream.WriteAsync(applied);
+
+        long pingTs = DateTime.UtcNow.Ticks;
+        await stream.WriteAsync(PacketWriter.Ping(pingTs));
+        var pong = await ReadPacketByTypeAsync(stream, PacketType.Pong, TimeSpan.FromSeconds(2));
+        Assert.Equal(PacketType.Pong, pong.Type);
     }
 
     [Fact]
@@ -512,6 +547,19 @@ public class RelayServerTests : IAsyncLifetime
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
             await stream.ReadPacketAsync(cts.Token);
         }
+    }
+
+    private static async Task<Packet> ReadPacketByTypeAsync(NetworkStream stream, PacketType expectedType, TimeSpan timeout)
+    {
+        using var cts = new CancellationTokenSource(timeout);
+        while (!cts.Token.IsCancellationRequested)
+        {
+            var packet = await stream.ReadPacketAsync(cts.Token);
+            if (packet.Type == expectedType)
+                return packet;
+        }
+
+        throw new TimeoutException($"Packet type {expectedType} not received within timeout.");
     }
 
     private sealed class NullServerObservabilitySink : KcdMp.Server.Observability.IServerObservabilitySink

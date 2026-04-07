@@ -95,6 +95,12 @@ public enum ServerObservableEventType
     IdentityRoleChanged = 72,
     AdminSessionKicked = 73,
     AdminAuditQueried = 74,
+    StateProjected = 75,
+    StateApplyStarted = 76,
+    StateApplySucceeded = 77,
+    StateApplyPartial = 78,
+    StateApplyFailed = 79,
+    StateDesyncDetected = 80,
 }
 
 public sealed record ServerObservableEvent(

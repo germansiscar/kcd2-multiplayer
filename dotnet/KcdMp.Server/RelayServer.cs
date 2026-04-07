@@ -1,5 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Text;
+using System.Text.Json;
 using KcdMp.Server.AccessControl;
 using KcdMp.Server.Admin;
 using KcdMp.Server.Audit;
@@ -40,6 +42,8 @@ public class RelayServer
     private readonly object _lock = new();
     private readonly ILogger _logger;
     private readonly IServerObservabilitySink _observability;
+    private readonly Dictionary<uint, PendingStateProjection> _pendingProjections = [];
+    private uint _projectionCounter;
 
     public RelayServer(
         int port,
@@ -223,6 +227,7 @@ public class RelayServer
                     }
 
                     HandleCharacterLifecycleOnSessionClose(session.SessionId, session.CloseReason);
+                    RemovePendingProjectionsForSession(session.SessionId);
                     _sessionBackend.CloseSession(session.SessionId, session.CloseReason);
                     _logger.Information("[-] {Client} disconnected. Clients: {ClientCount}. Reason: {CloseReason}. SessionId: {SessionId}",
                         session.Name ?? $"id={session.Id}", _clients.Count, session.CloseReason, session.SessionId);
@@ -635,6 +640,212 @@ public class RelayServer
         return (true, null, resolved.Identity.InternalId);
     }
 
+    internal async Task ProjectInitialStateAsync(Guid sessionId, CancellationToken ct = default)
+    {
+        ClientSession? client;
+        lock (_lock)
+            _clientsBySessionId.TryGetValue(sessionId, out client);
+
+        if (client is null || !client.IsReady)
+            return;
+
+        var session = _sessionBackend.GetActiveSessions().FirstOrDefault(x => x.SessionId == sessionId);
+        if (session is null)
+            return;
+
+        var accessConfig = await _accessControlService.GetActiveConfigurationAsync(ct);
+        var identity = !string.IsNullOrWhiteSpace(session.IdentityId)
+            ? await _identityService.GetByInternalIdAsync(session.IdentityId!, ct)
+            : null;
+        var inventory = await _characterInventoryService.GetLoadedForSessionAsync(sessionId, ct);
+        var currency = await _characterCurrencyService.GetLoadedForSessionAsync(sessionId, ct);
+        var respawn = await _characterRespawnService.GetLoadedForSessionAsync(sessionId, ct);
+
+        SendStateProjection(
+            client,
+            sessionId,
+            ProjectionDomain.SessionCharacter,
+            ProjectionApplicability.Direct,
+            new
+            {
+                sessionId = session.SessionId.ToString(),
+                transportClientId = session.TransportClientId,
+                identityId = session.IdentityId,
+                characterId = session.CharacterId,
+                displayName = client.Name,
+            },
+            retryable: true);
+
+        SendStateProjection(
+            client,
+            sessionId,
+            ProjectionDomain.Presence,
+            ProjectionApplicability.Direct,
+            new
+            {
+                mode = "ghost_npc",
+                projectionSource = "server",
+                remotePresenceEnabled = true,
+            },
+            retryable: true);
+
+        SendStateProjection(
+            client,
+            sessionId,
+            ProjectionDomain.LifeCycle,
+            ProjectionApplicability.Direct,
+            new
+            {
+                defeatState = respawn?.State.ToString() ?? CharacterDefeatState.Alive.ToString(),
+                unconsciousUntilUtc = respawn?.UnconsciousUntilUtc,
+                pendingRespawn = respawn?.State is CharacterDefeatState.PendingRespawn,
+            },
+            retryable: true);
+
+        SendStateProjection(
+            client,
+            sessionId,
+            ProjectionDomain.Inventory,
+            ProjectionApplicability.Partial,
+            new
+            {
+                characterId = session.CharacterId,
+                containerCount = inventory?.Containers.Count ?? 0,
+                totalItems = inventory?.Containers.Sum(x => x.Items.Count) ?? 0,
+                reflectable = true,
+                note = "Server inventory is canonical. Client/game reflection can be partial.",
+            },
+            retryable: true);
+
+        SendStateProjection(
+            client,
+            sessionId,
+            ProjectionDomain.Currency,
+            ProjectionApplicability.Partial,
+            new
+            {
+                characterId = session.CharacterId,
+                balance = currency?.Balance ?? 0,
+                reflectable = true,
+                note = "Server currency is canonical. Client/game reflection can be partial.",
+            },
+            retryable: true);
+
+        SendStateProjection(
+            client,
+            sessionId,
+            ProjectionDomain.Administrative,
+            ProjectionApplicability.Direct,
+            new
+            {
+                accessMode = accessConfig.AccessMode.ToString(),
+                identityRole = identity?.Role.ToString() ?? PlayerIdentityRole.Player.ToString(),
+                identityStatus = identity?.Status.ToString() ?? PlayerIdentityStatus.Active.ToString(),
+            },
+            retryable: true);
+    }
+
+    internal void RegisterStateProjectionResult(
+        Guid sessionId,
+        uint projectionId,
+        byte domainRaw,
+        byte statusRaw,
+        byte[] detailsPayload)
+    {
+        var domain = Enum.IsDefined(typeof(ProjectionDomain), domainRaw)
+            ? (ProjectionDomain)domainRaw
+            : ProjectionDomain.SessionCharacter;
+        var status = Enum.IsDefined(typeof(ProjectionApplyStatus), statusRaw)
+            ? (ProjectionApplyStatus)statusRaw
+            : ProjectionApplyStatus.Failed;
+        var detailsJson = detailsPayload.Length == 0 ? "{}" : Encoding.UTF8.GetString(detailsPayload);
+
+        var payload = new Dictionary<string, object?>
+        {
+            ["projection_id"] = projectionId,
+            ["domain"] = domain.ToString(),
+            ["status"] = status.ToString(),
+            ["details"] = detailsJson,
+        };
+
+        switch (status)
+        {
+            case ProjectionApplyStatus.Started:
+                Emit(
+                    ServerObservableEventType.StateApplyStarted,
+                    ServerObservableComponent.ClientIntegration,
+                    ServerObservableSeverity.Debug,
+                    "Client started applying server projection.",
+                    sessionId,
+                    payload);
+                return;
+
+            case ProjectionApplyStatus.Applied:
+                Emit(
+                    ServerObservableEventType.StateApplySucceeded,
+                    ServerObservableComponent.ClientIntegration,
+                    ServerObservableSeverity.Information,
+                    "Client applied server projection.",
+                    sessionId,
+                    payload);
+                break;
+
+            case ProjectionApplyStatus.PartiallyApplied:
+                Emit(
+                    ServerObservableEventType.StateApplyPartial,
+                    ServerObservableComponent.ClientIntegration,
+                    ServerObservableSeverity.Warning,
+                    "Client partially applied server projection.",
+                    sessionId,
+                    payload);
+                Emit(
+                    ServerObservableEventType.StateDesyncDetected,
+                    ServerObservableComponent.ClientIntegration,
+                    ServerObservableSeverity.Warning,
+                    "Projection partial apply indicates canonical/local mismatch.",
+                    sessionId,
+                    payload);
+                break;
+
+            case ProjectionApplyStatus.NotApplied:
+            case ProjectionApplyStatus.Failed:
+                Emit(
+                    ServerObservableEventType.StateApplyFailed,
+                    ServerObservableComponent.ClientIntegration,
+                    ServerObservableSeverity.Warning,
+                    "Client failed to apply server projection.",
+                    sessionId,
+                    payload);
+                Emit(
+                    ServerObservableEventType.StateDesyncDetected,
+                    ServerObservableComponent.ClientIntegration,
+                    ServerObservableSeverity.Warning,
+                    "Projection apply failed and generated a desync incident.",
+                    sessionId,
+                    payload);
+                break;
+        }
+
+        PendingStateProjection? pending = null;
+        lock (_lock)
+        {
+            if (_pendingProjections.TryGetValue(projectionId, out var found))
+            {
+                pending = found;
+                _pendingProjections.Remove(projectionId);
+            }
+        }
+
+        if (pending is null)
+            return;
+
+        if ((status is ProjectionApplyStatus.Failed or ProjectionApplyStatus.NotApplied)
+            && pending.Attempt < pending.MaxRetries)
+        {
+            ScheduleProjectionRetry(pending, status, detailsJson);
+        }
+    }
+
     public async Task<IdentityBanApplyResult> ApplyIdentityBanAsync(
         IdentityBanApplyRequest request,
         CancellationToken ct = default)
@@ -676,6 +887,124 @@ public class RelayServer
         CancellationToken ct = default)
     {
         return _identityBanService.RevokeActiveBanAsync(request, null, ct);
+    }
+
+    private void SendStateProjection(
+        ClientSession client,
+        Guid sessionId,
+        ProjectionDomain domain,
+        ProjectionApplicability applicability,
+        object payload,
+        bool retryable,
+        int maxRetries = 1)
+    {
+        var json = JsonSerializer.SerializeToUtf8Bytes(payload);
+        uint projectionId;
+        lock (_lock)
+        {
+            _projectionCounter++;
+            if (_projectionCounter == 0)
+                _projectionCounter++;
+            projectionId = _projectionCounter;
+            if (retryable)
+            {
+                _pendingProjections[projectionId] = new PendingStateProjection(
+                    projectionId,
+                    sessionId,
+                    domain,
+                    applicability,
+                    json,
+                    Attempt: 0,
+                    MaxRetries: Math.Max(0, maxRetries));
+            }
+        }
+
+        client.EnqueueRaw(PacketWriter.StateProjection(
+            projectionId,
+            (byte)domain,
+            (byte)applicability,
+            json));
+
+        Emit(
+            ServerObservableEventType.StateProjected,
+            ServerObservableComponent.ClientIntegration,
+            ServerObservableSeverity.Information,
+            "Server projected canonical state to client.",
+            sessionId,
+            payload: new Dictionary<string, object?>
+            {
+                ["projection_id"] = projectionId,
+                ["domain"] = domain.ToString(),
+                ["applicability"] = applicability.ToString(),
+                ["retryable"] = retryable,
+            });
+    }
+
+    private void ScheduleProjectionRetry(
+        PendingStateProjection pending,
+        ProjectionApplyStatus failureStatus,
+        string detailsJson)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(500 * (pending.Attempt + 1)));
+
+                ClientSession? client;
+                lock (_lock)
+                    _clientsBySessionId.TryGetValue(pending.SessionId, out client);
+
+                if (client is null || !client.IsReady)
+                    return;
+
+                var retried = pending with { Attempt = pending.Attempt + 1 };
+                lock (_lock)
+                    _pendingProjections[pending.ProjectionId] = retried;
+
+                client.EnqueueRaw(PacketWriter.StateProjection(
+                    retried.ProjectionId,
+                    (byte)retried.Domain,
+                    (byte)retried.Applicability,
+                    retried.JsonPayload));
+
+                Emit(
+                    ServerObservableEventType.StateProjected,
+                    ServerObservableComponent.ClientIntegration,
+                    ServerObservableSeverity.Warning,
+                    "Retrying state projection after failed apply attempt.",
+                    retried.SessionId,
+                    payload: new Dictionary<string, object?>
+                    {
+                        ["projection_id"] = retried.ProjectionId,
+                        ["domain"] = retried.Domain.ToString(),
+                        ["attempt"] = retried.Attempt,
+                        ["max_retries"] = retried.MaxRetries,
+                        ["previous_status"] = failureStatus.ToString(),
+                        ["previous_details"] = detailsJson,
+                    });
+            }
+            catch (Exception ex)
+            {
+                EmitBackendError(
+                    pending.SessionId,
+                    "Projection retry scheduling failed.",
+                    ex);
+            }
+        });
+    }
+
+    private void RemovePendingProjectionsForSession(Guid sessionId)
+    {
+        lock (_lock)
+        {
+            var stale = _pendingProjections
+                .Where(x => x.Value.SessionId == sessionId)
+                .Select(x => x.Key)
+                .ToArray();
+            foreach (var projectionId in stale)
+                _pendingProjections.Remove(projectionId);
+        }
     }
 
     private void HandleCharacterLifecycleOnSessionClose(Guid sessionId, ServerSessionCloseReason reason)
@@ -855,4 +1184,13 @@ public class RelayServer
             Message: message,
             Payload: payload));
     }
+
+    private sealed record PendingStateProjection(
+        uint ProjectionId,
+        Guid SessionId,
+        ProjectionDomain Domain,
+        ProjectionApplicability Applicability,
+        byte[] JsonPayload,
+        int Attempt,
+        int MaxRetries);
 }

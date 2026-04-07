@@ -480,11 +480,113 @@ public partial class GameBridge(
                         await HandleEventRelayAsync(srcId, eventType, jsonPayload);
                         break;
                     }
+
+                    case PacketType.StateProjection when packet.Payload.Length >= 6:
+                    {
+                        var (projectionId, domain, applicability, jsonPayload) = PacketReader.ParseStateProjection(packet.Payload);
+                        await HandleStateProjectionAsync(stream, projectionId, domain, applicability, jsonPayload);
+                        break;
+                    }
                 }
             }
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) when (ex is IOException or SocketException or EndOfStreamException) { }
+    }
+
+    private async Task HandleStateProjectionAsync(
+        NetworkStream stream,
+        uint projectionId,
+        byte domainRaw,
+        byte applicabilityRaw,
+        byte[] jsonPayload)
+    {
+        var domain = Enum.IsDefined(typeof(ProjectionDomain), domainRaw)
+            ? (ProjectionDomain)domainRaw
+            : ProjectionDomain.SessionCharacter;
+        var applicability = Enum.IsDefined(typeof(ProjectionApplicability), applicabilityRaw)
+            ? (ProjectionApplicability)applicabilityRaw
+            : ProjectionApplicability.NotApplicableYet;
+        var json = Encoding.UTF8.GetString(jsonPayload);
+
+        await SendProjectionApplyStatusAsync(
+            stream,
+            projectionId,
+            domainRaw,
+            ProjectionApplyStatus.Started,
+            """{"message":"projection apply started"}""",
+            CancellationToken.None);
+
+        try
+        {
+            await ApplyProjectionDomainAsync(domain, json);
+            var finalStatus = applicability switch
+            {
+                ProjectionApplicability.Direct => ProjectionApplyStatus.Applied,
+                ProjectionApplicability.Partial => ProjectionApplyStatus.PartiallyApplied,
+                _ => ProjectionApplyStatus.NotApplied,
+            };
+            var details = $$"""{"message":"projection applied","domain":"{{domain}}","applicability":"{{applicability}}"}""";
+            await SendProjectionApplyStatusAsync(stream, projectionId, domainRaw, finalStatus, details, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            var details = $$"""{"message":"projection apply failed","error":"{{EscapeJson(ex.Message)}}","domain":"{{domain}}"}""";
+            await SendProjectionApplyStatusAsync(
+                stream,
+                projectionId,
+                domainRaw,
+                ProjectionApplyStatus.Failed,
+                details,
+                CancellationToken.None);
+            _logger.Warning(ex, "[projection] apply failed id={ProjectionId} domain={Domain}", projectionId, domain);
+        }
+    }
+
+    private async Task SendProjectionApplyStatusAsync(
+        NetworkStream stream,
+        uint projectionId,
+        byte domain,
+        ProjectionApplyStatus status,
+        string detailsJson,
+        CancellationToken ct)
+    {
+        var detailsPayload = Encoding.UTF8.GetBytes(detailsJson);
+        var packet = PacketWriter.StateProjectionResult(
+            projectionId,
+            domain,
+            (byte)status,
+            detailsPayload);
+        await stream.WriteAsync(packet, ct);
+    }
+
+    private async Task ApplyProjectionDomainAsync(ProjectionDomain domain, string json)
+    {
+        var safeJson = EscapeLua(json);
+        switch (domain)
+        {
+            case ProjectionDomain.SessionCharacter:
+                await ExecLuaAsync($"KCD2MP_ApplySessionContext(\"{safeJson}\")");
+                break;
+            case ProjectionDomain.Presence:
+                await ExecLuaAsync($"KCD2MP_ApplyPresenceProjection(\"{safeJson}\")");
+                break;
+            case ProjectionDomain.LifeCycle:
+                await ExecLuaAsync($"KCD2MP_ApplyLifecycleProjection(\"{safeJson}\")");
+                break;
+            case ProjectionDomain.Inventory:
+                await ExecLuaAsync($"KCD2MP_ApplyInventoryProjection(\"{safeJson}\")");
+                break;
+            case ProjectionDomain.Currency:
+                await ExecLuaAsync($"KCD2MP_ApplyCurrencyProjection(\"{safeJson}\")");
+                break;
+            case ProjectionDomain.Administrative:
+                await ExecLuaAsync($"KCD2MP_ApplyAdministrativeProjection(\"{safeJson}\")");
+                break;
+            default:
+                await ExecLuaAsync($"KCD2MP_ApplySessionContext(\"{safeJson}\")");
+                break;
+        }
     }
 
     private async Task HandleStateSyncAsync(byte sourceId, byte stateType, byte[] payload)

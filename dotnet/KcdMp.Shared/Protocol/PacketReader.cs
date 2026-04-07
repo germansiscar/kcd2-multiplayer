@@ -75,4 +75,24 @@ public static class PacketReader
         Buffer.BlockCopy(payload, 3, json, 0, json.Length);
         return (payload[0], eventType, json);
     }
+
+    public static (uint projectionId, byte domain, byte applicability, byte[] jsonPayload) ParseStateProjection(byte[] payload)
+    {
+        var projectionId = BinaryPrimitives.ReadUInt32LittleEndian(payload.AsSpan(0, 4));
+        var domain = payload[4];
+        var applicability = payload[5];
+        var json = new byte[payload.Length - 6];
+        Buffer.BlockCopy(payload, 6, json, 0, json.Length);
+        return (projectionId, domain, applicability, json);
+    }
+
+    public static (uint projectionId, byte domain, byte status, byte[] detailsPayload) ParseStateProjectionResult(byte[] payload)
+    {
+        var projectionId = BinaryPrimitives.ReadUInt32LittleEndian(payload.AsSpan(0, 4));
+        var domain = payload[4];
+        var status = payload[5];
+        var details = new byte[payload.Length - 6];
+        Buffer.BlockCopy(payload, 6, details, 0, details.Length);
+        return (projectionId, domain, status, details);
+    }
 }

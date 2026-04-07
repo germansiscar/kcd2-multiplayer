@@ -407,3 +407,39 @@ Fecha de actualización: 2026-04-07
 - Evidencia:
   - tests nuevos en:
     - `dotnet/KcdMp.Tests/Server/ServerAdminServiceTests.cs`
+
+### F20 / FT-020 - Aplicacion de estado dirigida por servidor (IMPLEMENTADA)
+
+- Estado: implementada en codigo + cubierta con tests.
+- Reutiliza del repo actual:
+  - `dotnet/KcdMp.Server/RelayServer.cs` como orquestador de sesion y canon persistente.
+  - `dotnet/KcdMp.Client/GameBridge.cs` como adaptador local hacia runtime del juego.
+  - `kdcmp/Data/Scripts/Startup/kdcmp.lua` como ejecutor local dentro de capacidades verificadas.
+  - `dotnet/KcdMp.Server/Observability/` (FT-004) para trazabilidad del lifecycle de proyeccion.
+- Nueva implementacion:
+  - extension de protocolo compartido en `dotnet/KcdMp.Shared/Protocol/`:
+    - `PacketType.StateProjection` (0x0D)
+    - `PacketType.StateProjectionResult` (0x0E)
+    - enums `ProjectionDomain`, `ProjectionApplicability`, `ProjectionApplyStatus`
+    - serializacion/parsing dedicado en `PacketWriter` y `PacketReader`
+  - proyeccion canonica inicial servidor -> cliente al finalizar handshake:
+    - dominios: `SessionCharacter`, `Presence`, `LifeCycle`, `Inventory`, `Currency`, `Administrative`
+    - el servidor mantiene canon persistente y emite aplicabilidad (`Direct`, `Partial`, `NotApplicableYet`)
+  - reporte cliente -> servidor del ciclo de aplicacion:
+    - `Started`, `Applied`, `PartiallyApplied`, `NotApplied`, `Failed`
+    - adaptacion local por dominio en `GameBridge` + funciones Lua de proyeccion
+  - gestion de fallo con reintento controlado:
+    - incidente observable
+    - reenvio controlado de proyeccion fallida/no aplicada (`maxRetries` base)
+  - deteccion de desalineacion:
+    - eventos de observabilidad cuando la aplicacion es parcial/no aplicada/fallida
+- Refactor requerido:
+  - `ClientSession` ahora inicia proyeccion de estado canonico tras `Ack` y procesa `StateProjectionResult`.
+  - `RelayServer` incorpora tracking de proyecciones pendientes por sesion para retry y limpieza en cierre.
+- Riesgo tecnico introducido:
+  - la aplicacion local sigue limitada por debug REST API + capacidades del runtime (hibrido intencional).
+  - la logica de retry y tracking de proyeccion es in-process (sin coordinacion multi-nodo en esta etapa).
+- Evidencia:
+  - tests actualizados/nuevos en:
+    - `dotnet/KcdMp.Tests/Protocol/StateEventPacketTests.cs`
+    - `dotnet/KcdMp.Tests/Integration/RelayServerTests.cs`
