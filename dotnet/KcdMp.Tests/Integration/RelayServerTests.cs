@@ -1,5 +1,6 @@
 using System.Net.Sockets;
 using KcdMp.Server.AccessControl;
+using KcdMp.Server.Bans;
 using KcdMp.Server.Characters;
 using KcdMp.Server.Identity;
 using KcdMp.Server.Persistence;
@@ -361,6 +362,122 @@ public class RelayServerTests : IAsyncLifetime
             await stream.WriteAsync(PacketWriter.Handshake(handshake));
             var packet = await stream.ReadPacketAsync();
             Assert.Equal(PacketType.Ack, packet.Type);
+        }
+        finally
+        {
+            cts.Cancel();
+            try { await task; } catch { }
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Client_WithActiveBan_IsRejectedOnHandshake()
+    {
+        const int port = TestPort + 6;
+        var root = Path.Combine(Path.GetTempPath(), $"kcdmp_relay_ban_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        using var cts = new CancellationTokenSource();
+
+        var store = new JsonFilePersistenceStore(new JsonPersistenceOptions { BasePath = root });
+        var identities = new PlayerIdentityService(store, new NullServerObservabilitySink());
+        var bans = new IdentityBanService(store, new NullServerObservabilitySink());
+        var created = await identities.ResolveOrCreateAsync(
+            new PlayerIdentityClaim("BannedPlayer", "token_banned", null),
+            ServerAccessMode.Open);
+        Assert.NotNull(created.Identity);
+        await bans.ApplyBanAsync(new IdentityBanApplyRequest(
+            created.Identity!.InternalId,
+            IdentityBanType.Permanent,
+            null,
+            "Serious misconduct",
+            "admin_1",
+            Summary: "You are banned from this server."));
+
+        var server = new KcdMp.Server.RelayServer(
+            port,
+            password: TestPassword,
+            persistenceStore: store,
+            identityService: identities,
+            identityBanService: bans);
+        var task = server.RunAsync(cts.Token);
+        await Task.Delay(200);
+
+        try
+        {
+            using var tcp = new TcpClient();
+            await tcp.ConnectAsync("127.0.0.1", port);
+            var stream = tcp.GetStream();
+
+            await stream.WriteAsync(PacketWriter.Auth(TestPassword));
+            var authResponse = await stream.ReadPacketAsync();
+            Assert.True(PacketReader.ParseAuthResult(authResponse.Payload).ok);
+
+            var handshake = """{"displayName":"BannedPlayer","persistentToken":"token_banned"}""";
+            await stream.WriteAsync(PacketWriter.Handshake(handshake));
+            var rejected = await stream.ReadPacketAsync();
+            var (ok, reason) = PacketReader.ParseAuthResult(rejected.Payload);
+
+            Assert.False(ok);
+            Assert.Equal("You are banned from this server.", reason);
+        }
+        finally
+        {
+            cts.Cancel();
+            try { await task; } catch { }
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ApplyIdentityBanAsync_WhenIdentityConnected_KicksSessionImmediately()
+    {
+        const int port = TestPort + 7;
+        var root = Path.Combine(Path.GetTempPath(), $"kcdmp_relay_ban_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        using var cts = new CancellationTokenSource();
+
+        var server = new KcdMp.Server.RelayServer(
+            port,
+            password: TestPassword,
+            persistenceOptions: new JsonPersistenceOptions { BasePath = root });
+        var task = server.RunAsync(cts.Token);
+        await Task.Delay(200);
+
+        try
+        {
+            using var tcp = new TcpClient();
+            await tcp.ConnectAsync("127.0.0.1", port);
+            var stream = tcp.GetStream();
+
+            await stream.WriteAsync(PacketWriter.Auth(TestPassword));
+            var authResponse = await stream.ReadPacketAsync();
+            Assert.True(PacketReader.ParseAuthResult(authResponse.Payload).ok);
+
+            var handshake = """{"displayName":"LivePlayer","persistentToken":"token_live"}""";
+            await stream.WriteAsync(PacketWriter.Handshake(handshake));
+            var ack = await stream.ReadPacketAsync();
+            Assert.Equal(PacketType.Ack, ack.Type);
+
+            await Task.Delay(100);
+            var activeSession = Assert.Single(server.GetActiveSessions());
+            Assert.False(string.IsNullOrWhiteSpace(activeSession.IdentityId));
+
+            var apply = await server.ApplyIdentityBanAsync(new IdentityBanApplyRequest(
+                activeSession.IdentityId!,
+                IdentityBanType.Permanent,
+                null,
+                "Ban while connected",
+                "admin_live",
+                Summary: "Disconnected by moderation."));
+            Assert.True(apply.Applied);
+
+            await Task.Delay(250);
+            Assert.Empty(server.GetActiveSessions());
+            Assert.Contains(
+                server.GetClosedSessions(),
+                s => s.SessionId == activeSession.SessionId
+                     && s.CloseReason == KcdMp.Server.Sessions.ServerSessionCloseReason.AuthenticationRejected);
         }
         finally
         {

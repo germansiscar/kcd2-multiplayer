@@ -11,6 +11,7 @@ public static class JsonPersistenceDomains
     public const string InventoryRules = "inventory_rules";
     public const string Currency = "currency";
     public const string Respawn = "respawn";
+    public const string Bans = "bans";
     public const string Economy = "economy";
     public const string Audit = "audit";
     public const string Config = "config";
@@ -23,6 +24,7 @@ public static class JsonPersistenceDomains
         InventoryRules,
         Currency,
         Respawn,
+        Bans,
         Economy,
         Audit,
         Config,

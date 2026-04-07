@@ -242,6 +242,25 @@ public sealed class ServerSessionBackend
         }
     }
 
+    public bool TryGetSessionIdByIdentity(string identityId, out Guid sessionId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(identityId);
+
+        lock (_lock)
+        {
+            if (_identityToSession.TryGetValue(identityId, out var mappedSessionId)
+                && _sessions.TryGetValue(mappedSessionId, out var session)
+                && session.State != ServerSessionState.Closed)
+            {
+                sessionId = mappedSessionId;
+                return true;
+            }
+        }
+
+        sessionId = Guid.Empty;
+        return false;
+    }
+
     public bool CloseSession(Guid sessionId, ServerSessionCloseReason reason, DateTimeOffset? now = null)
     {
         var utcNow = now ?? DateTimeOffset.UtcNow;

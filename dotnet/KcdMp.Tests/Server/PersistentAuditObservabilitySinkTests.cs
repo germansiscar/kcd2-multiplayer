@@ -113,6 +113,51 @@ public sealed class PersistentAuditObservabilitySinkTests
         }
     }
 
+    [Fact]
+    public void Emit_BanApplied_IsAuditedAsAccessCategory()
+    {
+        var root = CreateTempDir();
+        try
+        {
+            var sink = new PersistentAuditObservabilitySink(
+                new JsonPersistenceOptions { BasePath = root, Environment = JsonPersistenceEnvironment.Development },
+                new ServerAuditOptions { Enabled = true, RetentionDays = 30, WriteIndented = true });
+            var occurredAt = new DateTimeOffset(2026, 4, 7, 12, 0, 0, TimeSpan.Zero);
+
+            sink.Emit(new ServerObservableEvent(
+                Type: ServerObservableEventType.BanApplied,
+                Component: ServerObservableComponent.Persistence,
+                Severity: ServerObservableSeverity.Warning,
+                OccurredAtUtc: occurredAt,
+                IdentityId: "pid_banned",
+                Message: "Identity ban applied.",
+                Payload: new Dictionary<string, object?>
+                {
+                    ["actor_id"] = "admin_1",
+                    ["ban_id"] = "ban_123",
+                }));
+
+            var partitionPath = Path.Combine(root, JsonPersistenceDomains.Audit, "2026-04-07.json");
+            Assert.True(File.Exists(partitionPath));
+
+            var json = File.ReadAllText(partitionPath);
+            var records = JsonSerializer.Deserialize<List<ServerAuditEventRecord>>(json, new JsonSerializerOptions
+            {
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            });
+
+            var record = Assert.Single(records!);
+            Assert.Equal(ServerAuditCategory.Access, record.Category);
+            Assert.Equal(ServerAuditResult.Ok, record.Result);
+            Assert.Equal("pid_banned", record.IdentityId);
+            Assert.Equal("admin_1", record.ActorId);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static string CreateTempDir()
     {
         var root = Path.Combine(Path.GetTempPath(), $"kcdmp_audit_{Guid.NewGuid():N}");

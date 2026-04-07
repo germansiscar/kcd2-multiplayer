@@ -85,6 +85,11 @@ public enum ServerObservableEventType
     AccessControlConfigValidationFailed = 62,
     AccessDecisionAllowed = 63,
     AccessDecisionDenied = 64,
+    BanApplied = 65,
+    BanRevoked = 66,
+    BanExpired = 67,
+    BanAccessDenied = 68,
+    BanSessionKicked = 69,
 }
 
 public sealed record ServerObservableEvent(

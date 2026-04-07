@@ -239,7 +239,12 @@ public sealed class PersistentAuditObservabilitySink : IServerObservabilitySink
         {
             ServerObservableEventType.AccessDecisionAllowed or
             ServerObservableEventType.AccessDecisionDenied or
-            ServerObservableEventType.IdentityAccessDenied => ServerAuditCategory.Access,
+            ServerObservableEventType.IdentityAccessDenied or
+            ServerObservableEventType.BanApplied or
+            ServerObservableEventType.BanRevoked or
+            ServerObservableEventType.BanExpired or
+            ServerObservableEventType.BanAccessDenied or
+            ServerObservableEventType.BanSessionKicked => ServerAuditCategory.Access,
 
             ServerObservableEventType.IdentityCreated => ServerAuditCategory.Identity,
 
@@ -279,6 +284,11 @@ public sealed class PersistentAuditObservabilitySink : IServerObservabilitySink
             ServerObservableEventType.AccessDecisionAllowed or
             ServerObservableEventType.AccessDecisionDenied or
             ServerObservableEventType.IdentityAccessDenied or
+            ServerObservableEventType.BanApplied or
+            ServerObservableEventType.BanRevoked or
+            ServerObservableEventType.BanExpired or
+            ServerObservableEventType.BanAccessDenied or
+            ServerObservableEventType.BanSessionKicked or
             ServerObservableEventType.IdentityCreated or
             ServerObservableEventType.CharacterCreated or
             ServerObservableEventType.CharacterDeleted or
@@ -311,6 +321,7 @@ public sealed class PersistentAuditObservabilitySink : IServerObservabilitySink
         return eventType is
             ServerObservableEventType.AccessDecisionDenied or
             ServerObservableEventType.IdentityAccessDenied or
+            ServerObservableEventType.BanAccessDenied or
             ServerObservableEventType.CharacterAccessDenied or
             ServerObservableEventType.CharacterLoadFailed or
             ServerObservableEventType.CharacterSaveFailed or

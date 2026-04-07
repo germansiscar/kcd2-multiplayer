@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Sockets;
 using KcdMp.Server.AccessControl;
 using KcdMp.Server.Audit;
+using KcdMp.Server.Bans;
 using KcdMp.Server.Characters;
 using KcdMp.Server.Currency;
 using KcdMp.Server.Identity;
@@ -23,6 +24,7 @@ public class RelayServer
     private readonly List<Task> _sessionTasks = [];
     private readonly ServerSessionBackend _sessionBackend;
     private readonly IServerAccessControlService _accessControlService;
+    private readonly IIdentityBanService _identityBanService;
     private readonly IPlayerIdentityService _identityService;
     private readonly ICharacterProfileService _characterProfileService;
     private readonly ICharacterSessionBindingService _characterBindingService;
@@ -43,6 +45,7 @@ public class RelayServer
         TimeSpan? sessionIdleTimeout = null,
         JsonPersistenceOptions? persistenceOptions = null,
         ServerAccessControlOptions? accessControlOptions = null,
+        IdentityBanOptions? identityBanOptions = null,
         PlayerIdentityOptions? identityOptions = null,
         CharacterSessionBindingOptions? characterBindingOptions = null,
         CharacterLifecycleOptions? characterLifecycleOptions = null,
@@ -56,6 +59,7 @@ public class RelayServer
         ServerAuditOptions? auditOptions = null,
         IJsonPersistenceStore? persistenceStore = null,
         IServerAccessControlService? accessControlService = null,
+        IIdentityBanService? identityBanService = null,
         IPlayerIdentityService? identityService = null,
         ICharacterProfileService? characterProfileService = null,
         ICharacterSessionBindingService? characterBindingService = null,
@@ -89,6 +93,7 @@ public class RelayServer
 
         var store = persistenceStore ?? new JsonFilePersistenceStore(persistenceOptions, _logger, _observability);
         _accessControlService = accessControlService ?? new ServerAccessControlService(store, _observability, accessControlOptions, _logger);
+        _identityBanService = identityBanService ?? new IdentityBanService(store, _observability, identityBanOptions, _logger);
         _identityService = identityService ?? new PlayerIdentityService(store, _observability, identityOptions, _logger);
         _characterProfileService = characterProfileService ?? new CharacterProfileService(store, _identityService, _observability, _logger);
         if (characterBindingService is not null)
@@ -356,6 +361,13 @@ public class RelayServer
         if (!resolved.IsAllowed || resolved.Identity is null)
             return (false, resolved.DenialReason ?? "Identity resolution failed.", null);
 
+        var banDecision = await _identityBanService.EvaluateAccessAsync(
+            sessionId,
+            resolved.Identity.InternalId,
+            ct);
+        if (banDecision.IsDenied)
+            return (false, banDecision.DenialReason ?? "Identity banned.", resolved.Identity.InternalId);
+
         var accessDecision = await _accessControlService.EvaluateIdentityAccessAsync(
             new ServerAccessIdentityEvaluationRequest(
                 SessionId: sessionId,
@@ -576,6 +588,49 @@ public class RelayServer
 
         _sessionBackend.SetCharacterReference(sessionId, binding.CharacterId);
         return (true, null, resolved.Identity.InternalId);
+    }
+
+    public async Task<IdentityBanApplyResult> ApplyIdentityBanAsync(
+        IdentityBanApplyRequest request,
+        CancellationToken ct = default)
+    {
+        var result = await _identityBanService.ApplyBanAsync(request, null, ct);
+        if (!result.Applied || string.IsNullOrWhiteSpace(request.IdentityId))
+            return result;
+
+        if (_sessionBackend.TryGetSessionIdByIdentity(request.IdentityId, out var activeSessionId))
+        {
+            ClientSession? client = null;
+            lock (_lock)
+            {
+                _clientsBySessionId.TryGetValue(activeSessionId, out client);
+            }
+
+            if (client is not null)
+            {
+                client.RequestClose(ServerSessionCloseReason.AuthenticationRejected);
+                Emit(
+                    ServerObservableEventType.BanSessionKicked,
+                    ServerObservableComponent.Session,
+                    ServerObservableSeverity.Warning,
+                    "Connected identity was kicked because a ban was applied.",
+                    activeSessionId,
+                    payload: new Dictionary<string, object?>
+                    {
+                        ["identity_id"] = request.IdentityId,
+                        ["ban_id"] = result.Ban?.BanId,
+                    });
+            }
+        }
+
+        return result;
+    }
+
+    public Task<IdentityBanRevocationResult> RevokeIdentityBanAsync(
+        IdentityBanRevocationRequest request,
+        CancellationToken ct = default)
+    {
+        return _identityBanService.RevokeActiveBanAsync(request, null, ct);
     }
 
     private void HandleCharacterLifecycleOnSessionClose(Guid sessionId, ServerSessionCloseReason reason)
