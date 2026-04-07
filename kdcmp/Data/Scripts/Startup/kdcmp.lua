@@ -2381,6 +2381,91 @@ local function _kcd2mp_read_json_bool(jsonStr, key)
     return nil
 end
 
+local function _kcd2mp_read_json_string(jsonStr, key)
+    if not jsonStr or not key then return nil end
+    local pattern = '"' .. key .. '"%s*:%s*"([^"]*)"'
+    local raw = jsonStr:match(pattern)
+    if not raw or raw == "" then return nil end
+    return raw
+end
+
+local function _kcd2mp_read_json_number(jsonStr, key)
+    if not jsonStr or not key then return nil end
+    local pattern = '"' .. key .. '"%s*:%s*(-?%d+)'
+    local raw = jsonStr:match(pattern)
+    if not raw then return nil end
+    return tonumber(raw)
+end
+
+local function _kcd2mp_world_init_log(stage, message)
+    local msg = "[KCD2-MP][WORLD_INIT] " .. tostring(stage or "unknown")
+    if message and message ~= "" then
+        msg = msg .. " " .. tostring(message)
+    end
+    pcall(function() System.LogAlways(msg) end)
+end
+
+local function _kcd2mp_is_runtime_managed_entity_name(name)
+    if not name or name == "" then return false end
+    return string.sub(name, 1, 12) == "kcd2mp_ghost"
+        or string.sub(name, 1, 12) == "kcd2mp_horse"
+        or string.sub(name, 1, 10) == "kcd2mp_npc"
+end
+
+local function _kcd2mp_cleanup_original_npcs_near_player(radius)
+    if not player then
+        return false, "player_missing", 0
+    end
+    if not System or not System.GetEntitiesInSphere then
+        return false, "entities_in_sphere_unavailable", 0
+    end
+
+    local removedCount = 0
+    local ok, err = pcall(function()
+        local ppos = player:GetWorldPos()
+        local ents = System.GetEntitiesInSphere(ppos, radius)
+        if not ents then return end
+
+        for _, ent in ipairs(ents) do
+            local isCharacter = false
+            local isHumanLike = false
+            local entId = nil
+            local entName = ""
+
+            pcall(function() isCharacter = ent:IsSlotCharacter(0) end)
+            pcall(function() isHumanLike = (ent.soul ~= nil) or (ent.human ~= nil) or (ent.actor ~= nil) end)
+            if isCharacter and isHumanLike then
+                pcall(function() entId = ent.id end)
+                pcall(function() entName = tostring(ent:GetName() or "") end)
+
+                local isPlayerEntity = false
+                pcall(function()
+                    if player and player.id and entId then
+                        isPlayerEntity = (player.id == entId)
+                    end
+                end)
+
+                if not isPlayerEntity and not _kcd2mp_is_runtime_managed_entity_name(entName) and entId then
+                    local removed = false
+                    pcall(function()
+                        System.RemoveEntity(entId)
+                        removed = true
+                    end)
+                    if removed then
+                        removedCount = removedCount + 1
+                    end
+                end
+            end
+        end
+    end)
+
+    if not ok then
+        return false, tostring(err), removedCount
+    end
+
+    return true, "", removedCount
+end
+
 function KCD2MP_ApplySessionContext(jsonStr)
     KCD2MP.serverProjectionState.session = jsonStr
     local characterId = jsonStr:match('"characterId"%s*:%s*"([^"]+)"')
@@ -2504,10 +2589,161 @@ function KCD2MP_ApplyAdministrativeProjection(jsonStr)
     return _kcd2mp_projection_result("applied", "administrative_projection_applied", "Administrative state stored")
 end
 
+KCD2MP.worldInitState = KCD2MP.worldInitState or {
+    completedCycles = {},
+    lastCycleId = nil,
+    lastProjection = nil,
+    reapplyOnZoneLoad = true,
+    zoneReapplyCounter = 0,
+}
+
+function KCD2MP_ApplyWorldInitialization(jsonStr, forceReapply)
+    if not jsonStr or jsonStr == "" then
+        return _kcd2mp_projection_result("failed", "missing_payload", "world initialization payload is required")
+    end
+
+    local cycleId = _kcd2mp_read_json_string(jsonStr, "cycleId") or "wi_runtime_cycle"
+    local trigger = _kcd2mp_read_json_string(jsonStr, "trigger") or "unknown"
+    local skillsPerksMode = _kcd2mp_read_json_string(jsonStr, "skillsPerksMode") or "pending"
+    local criticalNpcCleanup = _kcd2mp_read_json_bool(jsonStr, "criticalNpcCleanup")
+    local criticalInventoryCleanup = _kcd2mp_read_json_bool(jsonStr, "criticalInventoryCleanup")
+    local criticalEquipmentCleanup = _kcd2mp_read_json_bool(jsonStr, "criticalEquipmentCleanup")
+    local criticalSkillsPerksCleanup = _kcd2mp_read_json_bool(jsonStr, "criticalSkillsPerksCleanup")
+    local criticalServerStateApply = _kcd2mp_read_json_bool(jsonStr, "criticalServerStateApply")
+    local authoritativeStateReady = _kcd2mp_read_json_bool(jsonStr, "authoritativeStateReady")
+    local reapplyOnZoneLoad = _kcd2mp_read_json_bool(jsonStr, "reapplyOnZoneLoad")
+    local npcCleanupRadius = _kcd2mp_read_json_number(jsonStr, "npcCleanupRadius") or 140
+
+    if criticalNpcCleanup == nil then criticalNpcCleanup = true end
+    if criticalInventoryCleanup == nil then criticalInventoryCleanup = true end
+    if criticalEquipmentCleanup == nil then criticalEquipmentCleanup = true end
+    if criticalSkillsPerksCleanup == nil then criticalSkillsPerksCleanup = false end
+    if criticalServerStateApply == nil then criticalServerStateApply = true end
+    if authoritativeStateReady == nil then authoritativeStateReady = true end
+
+    KCD2MP.worldInitState.lastProjection = jsonStr
+    KCD2MP.worldInitState.lastCycleId = cycleId
+    if reapplyOnZoneLoad ~= nil then
+        KCD2MP.worldInitState.reapplyOnZoneLoad = reapplyOnZoneLoad
+    end
+
+    if KCD2MP.worldInitState.completedCycles[cycleId] and not forceReapply then
+        return _kcd2mp_projection_result("applied", "world_init_already_completed", "World init already completed for cycle " .. cycleId)
+    end
+
+    _kcd2mp_world_init_log("started", string.format("cycle=%s trigger=%s", cycleId, trigger))
+    pcall(function()
+        Game.SendInfoText("World init started (" .. cycleId .. ")")
+    end)
+
+    local failedCritical = false
+    local nonCriticalIssues = 0
+    local stepSummary = {}
+
+    local function record_step(name, ok, message, critical, deferred)
+        local status = "ok"
+        if deferred then
+            status = "deferred"
+            nonCriticalIssues = nonCriticalIssues + 1
+        elseif not ok then
+            status = "failed"
+            if critical then
+                failedCritical = true
+            else
+                nonCriticalIssues = nonCriticalIssues + 1
+            end
+        end
+        local details = tostring(message or "")
+        stepSummary[#stepSummary + 1] = string.format("%s=%s(%s)", name, status, details)
+        _kcd2mp_world_init_log(name, status .. " " .. details)
+    end
+
+    local npcOk, npcErr, npcRemoved = _kcd2mp_cleanup_original_npcs_near_player(npcCleanupRadius)
+    record_step("npc_cleanup", npcOk, npcOk and ("removed=" .. tostring(npcRemoved)) or npcErr, criticalNpcCleanup, false)
+
+    local invOk, invErr = pcall(function()
+        if player and player.inventory and player.inventory.RemoveAllItems then
+            player.inventory:RemoveAllItems()
+        else
+            error("player inventory RemoveAllItems is unavailable")
+        end
+    end)
+    record_step("inventory_cleanup", invOk, invOk and "inventory_cleared" or tostring(invErr), criticalInventoryCleanup, false)
+
+    local equipOk, equipErr = pcall(function()
+        if player and player.actor and player.actor.HolsterItem then
+            player.actor:HolsterItem(true)
+        end
+    end)
+    record_step("equipment_cleanup", equipOk, equipOk and "equipment_cleared_or_holstered" or tostring(equipErr), criticalEquipmentCleanup, false)
+
+    local currencyResetSupported = false
+    record_step("currency_cleanup", currencyResetSupported, "currency_reset_not_verified", false, true)
+
+    if skillsPerksMode == "pending" then
+        record_step("skills_perks_reset", true, "pending_progression_system", false, true)
+    else
+        record_step("skills_perks_reset", false, "skills_perks_reset_not_verified", criticalSkillsPerksCleanup, false)
+    end
+
+    if authoritativeStateReady then
+        record_step("server_state_apply_gate", true, "server_state_projection_ready", criticalServerStateApply, false)
+    else
+        record_step("server_state_apply_gate", false, "server_state_not_ready", criticalServerStateApply, false)
+    end
+
+    local summary = table.concat(stepSummary, ";")
+    if failedCritical then
+        pcall(function()
+            Game.SendInfoText("World init failed (critical). Session will be blocked.")
+        end)
+        return _kcd2mp_projection_result("failed", "world_init_critical_failed", summary)
+    end
+
+    KCD2MP.worldInitState.completedCycles[cycleId] = true
+    KCD2MP.serverProjectionState.worldInitCycleId = cycleId
+
+    if nonCriticalIssues > 0 then
+        return _kcd2mp_projection_result("partial", "world_init_partial", summary)
+    end
+
+    pcall(function()
+        Game.SendInfoText("World init completed (" .. cycleId .. ")")
+    end)
+    return _kcd2mp_projection_result("applied", "world_init_completed", summary)
+end
+
+function KCD2MP_OnPlayerLoaded(reason)
+    local state = KCD2MP.worldInitState
+    if not state or not state.reapplyOnZoneLoad then return end
+    if not state.lastProjection or state.lastProjection == "" then return end
+
+    state.zoneReapplyCounter = (state.zoneReapplyCounter or 0) + 1
+    local baseCycle = state.lastCycleId or "wi_runtime_cycle"
+    local newCycleId = string.format("%s_zone_%d", baseCycle, state.zoneReapplyCounter)
+    local patchedPayload = state.lastProjection
+
+    if string.find(patchedPayload, '"cycleId"%s*:%s*"[^"]*"') then
+        patchedPayload = string.gsub(patchedPayload, '"cycleId"%s*:%s*"[^"]*"', '"cycleId":"' .. newCycleId .. '"', 1)
+    elseif string.sub(patchedPayload, -1) == "}" then
+        patchedPayload = string.sub(patchedPayload, 1, -2) .. ',"cycleId":"' .. newCycleId .. '"}'
+    end
+
+    _kcd2mp_world_init_log("reapply", string.format("reason=%s cycle=%s", tostring(reason or "unknown"), newCycleId))
+    KCD2MP_ApplyWorldInitialization(patchedPayload, true)
+end
+
 function KCD2MP_ClearRuntimeProjectionState(reason)
     local msg = reason or "Runtime context cleared."
     pcall(function()
         KCD2MP.serverProjectionState = {}
+        KCD2MP.worldInitState = {
+            completedCycles = {},
+            lastCycleId = nil,
+            lastProjection = nil,
+            reapplyOnZoneLoad = true,
+            zoneReapplyCounter = 0,
+        }
         KCD2MP_RemoveAllGhosts()
         Game.SendInfoText(msg)
     end)
@@ -2536,6 +2772,11 @@ local ok2, err2 = pcall(function()
         if origOnInit then origOnInit(self) end
         System.LogAlways("[KCD2-MP] Player loaded!")
         KCD2MP_GetPos()
+        pcall(function()
+            if KCD2MP_OnPlayerLoaded then
+                KCD2MP_OnPlayerLoaded("player_on_init")
+            end
+        end)
 
         -- Re-install OnAction hooks here (after player fully initialized).
         -- Player.Client.OnAction may be reset during game load; re-hooking in OnInit

@@ -108,6 +108,10 @@ public enum ServerObservableEventType
     PresenceRepresentationFailed = 85,
     PresenceDesyncDetected = 86,
     PresenceDesyncCorrected = 87,
+    WorldInitializationStarted = 88,
+    WorldInitializationCompleted = 89,
+    WorldInitializationFailed = 90,
+    WorldInitializationBlocked = 91,
 }
 
 public sealed record ServerObservableEvent(

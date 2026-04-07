@@ -24,6 +24,11 @@ public class KcdmpConfig
     public string ServerAccessMode { get; set; } = "Open";
     public bool IdentityRequireWhitelist { get; set; } = false;
     public bool CharacterRequireOnConnect { get; set; } = false;
+    public bool WorldInitEnabled { get; set; } = true;
+    public int WorldInitMaxRetries { get; set; } = 1;
+    public bool WorldInitBlockOnCriticalFailure { get; set; } = true;
+    public string WorldInitSkillsPerksMode { get; set; } = "pending";
+    public bool WorldInitReapplyOnZoneLoad { get; set; } = true;
     public long CurrencyInitialBalance { get; set; } = 0;
     public int CurrencySaveRetryCount { get; set; } = 1;
     public int CurrencySaveRetryDelayMs { get; set; } = 100;

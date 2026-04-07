@@ -20,6 +20,11 @@ public class KcdmpConfigTests
         Assert.Equal("", config.CharacterId);
         Assert.Equal("Open", config.ServerAccessMode);
         Assert.False(config.CharacterRequireOnConnect);
+        Assert.True(config.WorldInitEnabled);
+        Assert.Equal(1, config.WorldInitMaxRetries);
+        Assert.True(config.WorldInitBlockOnCriticalFailure);
+        Assert.Equal("pending", config.WorldInitSkillsPerksMode);
+        Assert.True(config.WorldInitReapplyOnZoneLoad);
         Assert.Equal(0, config.CurrencyInitialBalance);
         Assert.Equal(1, config.CurrencySaveRetryCount);
         Assert.Equal(100, config.CurrencySaveRetryDelayMs);
@@ -46,6 +51,11 @@ public class KcdmpConfigTests
             CharacterId = "cid_123",
             ServerAccessMode = "Whitelist",
             CharacterRequireOnConnect = true,
+            WorldInitEnabled = true,
+            WorldInitMaxRetries = 2,
+            WorldInitBlockOnCriticalFailure = true,
+            WorldInitSkillsPerksMode = "baseline_none",
+            WorldInitReapplyOnZoneLoad = false,
             CurrencyInitialBalance = 250,
             CurrencySaveRetryCount = 3,
             CurrencySaveRetryDelayMs = 400,
@@ -68,6 +78,11 @@ public class KcdmpConfigTests
         Assert.Equal("cid_123", loaded.CharacterId);
         Assert.Equal("Whitelist", loaded.ServerAccessMode);
         Assert.True(loaded.CharacterRequireOnConnect);
+        Assert.True(loaded.WorldInitEnabled);
+        Assert.Equal(2, loaded.WorldInitMaxRetries);
+        Assert.True(loaded.WorldInitBlockOnCriticalFailure);
+        Assert.Equal("baseline_none", loaded.WorldInitSkillsPerksMode);
+        Assert.False(loaded.WorldInitReapplyOnZoneLoad);
         Assert.Equal(250, loaded.CurrencyInitialBalance);
         Assert.Equal(3, loaded.CurrencySaveRetryCount);
         Assert.Equal(400, loaded.CurrencySaveRetryDelayMs);

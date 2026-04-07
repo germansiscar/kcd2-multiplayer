@@ -8,5 +8,6 @@ public enum ProjectionDomain : byte
     Inventory = 4,
     Currency = 5,
     Administrative = 6,
+    WorldInitialization = 7,
 }
 

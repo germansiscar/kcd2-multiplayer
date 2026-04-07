@@ -84,6 +84,13 @@ if (config.Mode == "host")
     Log.Information("Audit enabled: {Enabled} (retention days: {RetentionDays})", auditOptions.Enabled, auditOptions.RetentionDays);
     Log.Information("Currency initial balance: {Balance}", currencyOptions.InitialBalance);
     Log.Information("Respawn unconscious duration (s): {Duration}", respawnOptions.UnconsciousDuration.TotalSeconds);
+    Log.Information(
+        "World init: enabled={Enabled}, retries={Retries}, blockOnCriticalFailure={Block}, skillsPerksMode={Mode}, reapplyOnZoneLoad={Reapply}",
+        config.WorldInitEnabled,
+        config.WorldInitMaxRetries,
+        config.WorldInitBlockOnCriticalFailure,
+        config.WorldInitSkillsPerksMode,
+        config.WorldInitReapplyOnZoneLoad);
     Log.Information("Bootstrap admin identities: {Count}", config.AdminIdentityIds.Count);
 
     var server = new RelayServer(
@@ -94,6 +101,11 @@ if (config.Mode == "host")
         characterBindingOptions: characterBindingOptions,
         characterCurrencyOptions: currencyOptions,
         characterRespawnOptions: respawnOptions,
+        worldInitEnabled: config.WorldInitEnabled,
+        worldInitMaxRetries: config.WorldInitMaxRetries,
+        worldInitBlockOnCriticalFailure: config.WorldInitBlockOnCriticalFailure,
+        worldInitSkillsPerksMode: config.WorldInitSkillsPerksMode,
+        worldInitReapplyOnZoneLoad: config.WorldInitReapplyOnZoneLoad,
         auditOptions: auditOptions,
         observabilityOptions: observabilityOptions,
         bootstrapAdminIdentityIds: config.AdminIdentityIds);

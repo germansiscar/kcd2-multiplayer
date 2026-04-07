@@ -43,6 +43,11 @@ public class RelayServer
     private readonly ILogger _logger;
     private readonly IServerObservabilitySink _observability;
     private readonly Dictionary<uint, PendingStateProjection> _pendingProjections = [];
+    private readonly bool _worldInitEnabled;
+    private readonly int _worldInitMaxRetries;
+    private readonly bool _worldInitBlockOnCriticalFailure;
+    private readonly string _worldInitSkillsPerksMode;
+    private readonly bool _worldInitReapplyOnZoneLoad;
     private uint _projectionCounter;
     private long _presenceRevision;
     private readonly Dictionary<Guid, PresenceSpatialSnapshot> _presenceSpatialBySession = [];
@@ -78,6 +83,11 @@ public class RelayServer
         ICharacterCurrencyService? characterCurrencyService = null,
         ICharacterRespawnService? characterRespawnService = null,
         IInventoryRulesConfigurationService? inventoryRulesService = null,
+        bool worldInitEnabled = true,
+        int worldInitMaxRetries = 1,
+        bool worldInitBlockOnCriticalFailure = true,
+        string? worldInitSkillsPerksMode = null,
+        bool worldInitReapplyOnZoneLoad = true,
         IReadOnlyCollection<string>? bootstrapAdminIdentityIds = null,
         IServerAdminService? adminService = null)
     {
@@ -88,6 +98,11 @@ public class RelayServer
         _bootstrapAdminIdentityIds = bootstrapAdminIdentityIds is null
             ? new HashSet<string>(StringComparer.Ordinal)
             : new HashSet<string>(bootstrapAdminIdentityIds.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim()), StringComparer.Ordinal);
+        _worldInitEnabled = worldInitEnabled;
+        _worldInitMaxRetries = Math.Max(0, worldInitMaxRetries);
+        _worldInitBlockOnCriticalFailure = worldInitBlockOnCriticalFailure;
+        _worldInitSkillsPerksMode = string.IsNullOrWhiteSpace(worldInitSkillsPerksMode) ? "pending" : worldInitSkillsPerksMode.Trim();
+        _worldInitReapplyOnZoneLoad = worldInitReapplyOnZoneLoad;
         _sessionBackend = new ServerSessionBackend(sessionIdleTimeout);
         _sessionBackend.LifecycleEventEmitted += HandleSessionLifecycleEvent;
         if (observability is not null)
@@ -750,6 +765,31 @@ public class RelayServer
             },
             retryable: true);
 
+        if (_worldInitEnabled)
+        {
+            SendStateProjection(
+                client,
+                sessionId,
+                ProjectionDomain.WorldInitialization,
+                ProjectionApplicability.Direct,
+                new
+                {
+                    cycleId = $"wi_{Guid.NewGuid():N}",
+                    trigger = "session_connect",
+                    blockOnCriticalFailure = _worldInitBlockOnCriticalFailure,
+                    reapplyOnZoneLoad = _worldInitReapplyOnZoneLoad,
+                    skillsPerksMode = _worldInitSkillsPerksMode,
+                    criticalNpcCleanup = true,
+                    criticalInventoryCleanup = true,
+                    criticalEquipmentCleanup = true,
+                    criticalSkillsPerksCleanup = !string.Equals(_worldInitSkillsPerksMode, "pending", StringComparison.OrdinalIgnoreCase),
+                    criticalServerStateApply = true,
+                    authoritativeStateReady = true,
+                },
+                retryable: true,
+                maxRetries: _worldInitMaxRetries);
+        }
+
         await SendPresenceProjectionToClientAsync(
             client,
             sessionId,
@@ -1053,6 +1093,16 @@ public class RelayServer
                         sessionId,
                         payload);
                 }
+                else if (domain == ProjectionDomain.WorldInitialization)
+                {
+                    Emit(
+                        ServerObservableEventType.WorldInitializationStarted,
+                        ServerObservableComponent.ClientIntegration,
+                        ServerObservableSeverity.Information,
+                        "World initialization projection started.",
+                        sessionId,
+                        payload);
+                }
                 return;
 
             case ProjectionApplyStatus.Applied:
@@ -1063,6 +1113,16 @@ public class RelayServer
                     "Client applied server projection.",
                     sessionId,
                     payload);
+                if (domain == ProjectionDomain.WorldInitialization)
+                {
+                    Emit(
+                        ServerObservableEventType.WorldInitializationCompleted,
+                        ServerObservableComponent.ClientIntegration,
+                        ServerObservableSeverity.Information,
+                        "World initialization completed.",
+                        sessionId,
+                        payload);
+                }
                 break;
 
             case ProjectionApplyStatus.PartiallyApplied:
@@ -1108,6 +1168,16 @@ public class RelayServer
                     "Client failed to apply server projection.",
                     sessionId,
                     payload);
+                if (domain == ProjectionDomain.WorldInitialization)
+                {
+                    Emit(
+                        ServerObservableEventType.WorldInitializationFailed,
+                        ServerObservableComponent.ClientIntegration,
+                        ServerObservableSeverity.Warning,
+                        "World initialization failed.",
+                        sessionId,
+                        payload);
+                }
                 Emit(
                     ServerObservableEventType.StateDesyncDetected,
                     ServerObservableComponent.ClientIntegration,
@@ -1165,6 +1235,48 @@ public class RelayServer
             && pending.Attempt < pending.MaxRetries)
         {
             ScheduleProjectionRetry(pending, status, detailsJson);
+            return;
+        }
+
+        if (pending.Domain == ProjectionDomain.WorldInitialization
+            && _worldInitBlockOnCriticalFailure
+            && (status is ProjectionApplyStatus.Failed or ProjectionApplyStatus.NotApplied))
+        {
+            Emit(
+                ServerObservableEventType.WorldInitializationBlocked,
+                ServerObservableComponent.ClientIntegration,
+                ServerObservableSeverity.Warning,
+                "World initialization failed after retries; session will be blocked.",
+                sessionId,
+                payload);
+
+            ClientSession? client;
+            lock (_lock)
+                _clientsBySessionId.TryGetValue(sessionId, out client);
+
+            if (client is not null)
+            {
+                SendAdministrativeInvalidationProjection(
+                    client,
+                    sessionId,
+                    reasonCode: "world_init_failed",
+                    message: "World initialization failed. Session blocked until local state is recovered.",
+                    accessDenied: true,
+                    isBanned: false,
+                    kicked: true);
+
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await Task.Delay(100);
+                        client.RequestClose(ServerSessionCloseReason.AuthenticationRejected);
+                    }
+                    catch
+                    {
+                    }
+                });
+            }
         }
     }
 
