@@ -117,6 +117,13 @@ public enum ServerObservableEventType
     ChatMessageRejected = 94,
     ChatRateLimitTriggered = 95,
     ChatInvalidChannel = 96,
+    LootStarted = 97,
+    LootAllowed = 98,
+    LootDenied = 99,
+    LootItemTransferred = 100,
+    LootAccessConflict = 101,
+    LootExecutionFailed = 102,
+    LootDesyncIncident = 103,
 }
 
 public sealed record ServerObservableEvent(

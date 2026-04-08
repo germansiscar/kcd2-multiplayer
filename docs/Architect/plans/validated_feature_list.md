@@ -408,6 +408,41 @@ Fecha de actualización: 2026-04-07
   - tests nuevos en:
     - `dotnet/KcdMp.Tests/Server/ServerAdminServiceTests.cs`
 
+### F18 / FT-018 - Lootable inventory (IMPLEMENTADA)
+
+- Estado: implementada en codigo + cubierta con tests de servidor.
+- Reutiliza del repo actual:
+  - `dotnet/KcdMp.Server/Inventory/` (FT-009) como inventario persistente canonico por sesion/personaje.
+  - `dotnet/KcdMp.Server/Currency/` (FT-010) para transferencias de dinero persistente.
+  - `dotnet/KcdMp.Server/Respawn/` (FT-011) + `dotnet/KcdMp.Server/InventoryRules/` (FT-012) para validacion de loot sobre personaje.
+  - `dotnet/KcdMp.Server/Observability/` + `dotnet/KcdMp.Server/Audit/` para lifecycle e incidentes de loot.
+- Nueva implementacion:
+  - modulo `dotnet/KcdMp.Server/Loot/` con:
+    - dominio persistente de baules `world_containers` con entidad `LootableChestRecord`
+    - servicio `LootableInventoryService` + contrato `ILootableInventoryService`
+    - transferencia canonica de items entre personaje↔personaje y baul→personaje
+    - transferencia canonica de dinero en loot (personaje y baul)
+    - locks simples por objetivo (`character:{id}` / `chest:{id}`) para evitar concurrencia inconsistente
+    - validaciones de contexto de loot: distancia maxima, estado de objetivo, acceso por llave/abierto/lockpick y estado esperado opcional
+    - eventos observables nuevos:
+      - `LootStarted`
+      - `LootAllowed`
+      - `LootDenied`
+      - `LootItemTransferred`
+      - `LootAccessConflict`
+      - `LootExecutionFailed`
+      - `LootDesyncIncident`
+  - extension de `JsonPersistenceDomains` con `WorldContainers`.
+  - auditoria extendida para clasificar eventos de loot bajo categoria `Inventory`.
+- Refactor requerido:
+  - extensiones aditivas (sin ruptura de capas ni mover canon fuera de `KcdMp.Server`).
+- Riesgo tecnico introducido:
+  - la coordinacion de locks es in-process (sin coordinacion multi-nodo).
+  - reflejo local runtime/UI del loot queda como integracion incremental cliente/runtime.
+- Evidencia:
+  - tests nuevos en:
+    - `dotnet/KcdMp.Tests/Server/LootableInventoryServiceTests.cs`
+
 ### F20 / FT-020 - Aplicacion de estado dirigida por servidor (IMPLEMENTADA)
 
 - Estado: implementada en codigo + cubierta con tests.
