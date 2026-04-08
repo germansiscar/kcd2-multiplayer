@@ -261,7 +261,14 @@ public sealed class PersistentAuditObservabilitySink : IServerObservabilitySink
 
             ServerObservableEventType.InventoryChanged or
             ServerObservableEventType.InventoryValidationFailed or
-            ServerObservableEventType.InventorySaveFailed => ServerAuditCategory.Inventory,
+            ServerObservableEventType.InventorySaveFailed or
+            ServerObservableEventType.LootStarted or
+            ServerObservableEventType.LootAllowed or
+            ServerObservableEventType.LootDenied or
+            ServerObservableEventType.LootItemTransferred or
+            ServerObservableEventType.LootAccessConflict or
+            ServerObservableEventType.LootExecutionFailed or
+            ServerObservableEventType.LootDesyncIncident => ServerAuditCategory.Inventory,
 
             ServerObservableEventType.CurrencyChanged or
             ServerObservableEventType.CurrencyValidationFailed or
@@ -315,6 +322,13 @@ public sealed class PersistentAuditObservabilitySink : IServerObservabilitySink
             ServerObservableEventType.InventoryChanged or
             ServerObservableEventType.InventoryValidationFailed or
             ServerObservableEventType.InventorySaveFailed or
+            ServerObservableEventType.LootStarted or
+            ServerObservableEventType.LootAllowed or
+            ServerObservableEventType.LootDenied or
+            ServerObservableEventType.LootItemTransferred or
+            ServerObservableEventType.LootAccessConflict or
+            ServerObservableEventType.LootExecutionFailed or
+            ServerObservableEventType.LootDesyncIncident or
             ServerObservableEventType.CurrencyChanged or
             ServerObservableEventType.CurrencyValidationFailed or
             ServerObservableEventType.CurrencySaveFailed or
@@ -350,6 +364,10 @@ public sealed class PersistentAuditObservabilitySink : IServerObservabilitySink
             ServerObservableEventType.CharacterSaveFailed or
             ServerObservableEventType.InventoryValidationFailed or
             ServerObservableEventType.InventorySaveFailed or
+            ServerObservableEventType.LootDenied or
+            ServerObservableEventType.LootAccessConflict or
+            ServerObservableEventType.LootExecutionFailed or
+            ServerObservableEventType.LootDesyncIncident or
             ServerObservableEventType.CurrencyValidationFailed or
             ServerObservableEventType.CurrencySaveFailed or
             ServerObservableEventType.RespawnApplyFailed or

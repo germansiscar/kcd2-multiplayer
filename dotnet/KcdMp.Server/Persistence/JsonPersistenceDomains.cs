@@ -9,6 +9,7 @@ public static class JsonPersistenceDomains
     public const string Characters = "characters";
     public const string Inventory = "inventory";
     public const string InventoryRules = "inventory_rules";
+    public const string WorldContainers = "world_containers";
     public const string Currency = "currency";
     public const string Respawn = "respawn";
     public const string Bans = "bans";
@@ -22,6 +23,7 @@ public static class JsonPersistenceDomains
         Characters,
         Inventory,
         InventoryRules,
+        WorldContainers,
         Currency,
         Respawn,
         Bans,
