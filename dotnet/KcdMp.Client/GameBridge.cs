@@ -79,6 +79,17 @@ public partial class GameBridge(
         string Code,
         string Message,
         string RawValue);
+    private sealed record InventoryRuntimeItem(
+        string InternalId,
+        string ContainerId,
+        int Quantity,
+        string RuntimeItemGuid);
+    private sealed record InventoryRuntimePlan(
+        int TotalItems,
+        int UnresolvedItems,
+        bool ForcedCorrection,
+        long? CurrencyBalance,
+        IReadOnlyList<InventoryRuntimeItem> RuntimeItems);
 
     public async Task RunAsync(CancellationToken ct = default)
     {
@@ -649,7 +660,7 @@ public partial class GameBridge(
             case ProjectionDomain.LifeCycle:
                 return await InvokeRuntimeProjectionApplyAsync("KCD2MP_ApplyLifecycleProjection", safeJson);
             case ProjectionDomain.Inventory:
-                return await InvokeRuntimeProjectionApplyAsync("KCD2MP_ApplyInventoryProjection", safeJson);
+                return await ApplyInventoryProjectionAsync(json);
             case ProjectionDomain.Currency:
                 return await InvokeRuntimeProjectionApplyAsync("KCD2MP_ApplyCurrencyProjection", safeJson);
             case ProjectionDomain.Administrative:
@@ -659,6 +670,239 @@ public partial class GameBridge(
             default:
                 return await InvokeRuntimeProjectionApplyAsync("KCD2MP_ApplySessionContext", safeJson);
         }
+    }
+
+    private async Task<RuntimeProjectionApplyResult> ApplyInventoryProjectionAsync(string json)
+    {
+        var received = await InvokeRuntimeProjectionApplyAsync("KCD2MP_ApplyInventoryProjection", EscapeLua(json));
+        if (received.Status is ProjectionApplyStatus.Failed or ProjectionApplyStatus.NotApplied)
+            return received;
+
+        if (!TryBuildInventoryRuntimePlan(json, out var plan, out var parseError))
+        {
+            return new RuntimeProjectionApplyResult(
+                ProjectionApplyStatus.Failed,
+                "inventory_projection_parse_failed",
+                parseError,
+                string.Empty);
+        }
+
+        var clear = await InvokeRuntimeProjectionApplyAsync("KCD2MP_ApplyInventoryClear", "{}");
+        if (clear.Status != ProjectionApplyStatus.Applied)
+        {
+            return new RuntimeProjectionApplyResult(
+                ProjectionApplyStatus.Failed,
+                "inventory_clear_failed",
+                clear.Message,
+                clear.RawValue);
+        }
+
+        var appliedItems = 0;
+        var failedItems = 0;
+        foreach (var item in plan.RuntimeItems)
+        {
+            var itemPayload = JsonSerializer.Serialize(new
+            {
+                itemGuid = item.RuntimeItemGuid,
+                quantity = item.Quantity,
+                internalId = item.InternalId,
+                containerId = item.ContainerId,
+            });
+            var applied = await InvokeRuntimeProjectionApplyAsync("KCD2MP_ApplyInventoryItem", EscapeLua(itemPayload));
+            if (applied.Status == ProjectionApplyStatus.Applied)
+            {
+                appliedItems++;
+            }
+            else
+            {
+                failedItems++;
+            }
+        }
+
+        RuntimeProjectionApplyResult? currencyResult = null;
+        if (plan.CurrencyBalance.HasValue)
+        {
+            var currencyPayload = JsonSerializer.Serialize(new { balance = plan.CurrencyBalance.Value });
+            currencyResult = await InvokeRuntimeProjectionApplyAsync("KCD2MP_ApplyCurrencyProjection", EscapeLua(currencyPayload));
+        }
+
+        var unresolvedItems = plan.UnresolvedItems + failedItems;
+        var finalizePayload = JsonSerializer.Serialize(new
+        {
+            totalItems = plan.TotalItems,
+            appliedItems,
+            unresolvedItems,
+            forcedCorrection = plan.ForcedCorrection,
+        });
+        var finalized = await InvokeRuntimeProjectionApplyAsync("KCD2MP_FinalizeInventoryProjection", EscapeLua(finalizePayload));
+        if (finalized.Status is ProjectionApplyStatus.Failed or ProjectionApplyStatus.NotApplied)
+            return finalized;
+
+        if (currencyResult is not null
+            && (currencyResult.Status is ProjectionApplyStatus.Failed or ProjectionApplyStatus.NotApplied))
+        {
+            return new RuntimeProjectionApplyResult(
+                ProjectionApplyStatus.PartiallyApplied,
+                "currency_projection_partial",
+                "Inventory applied but currency reflection failed.",
+                currencyResult.RawValue);
+        }
+
+        if (plan.TotalItems > 0 && appliedItems == 0)
+        {
+            return new RuntimeProjectionApplyResult(
+                ProjectionApplyStatus.NotApplied,
+                "inventory_items_not_projectable",
+                "No canonical items were projectable with verified runtime GUIDs.",
+                finalized.RawValue);
+        }
+
+        if (unresolvedItems > 0)
+        {
+            return new RuntimeProjectionApplyResult(
+                ProjectionApplyStatus.PartiallyApplied,
+                "inventory_projection_partial",
+                $"Applied {appliedItems}/{plan.TotalItems} canonical items.",
+                finalized.RawValue);
+        }
+
+        return new RuntimeProjectionApplyResult(
+            ProjectionApplyStatus.Applied,
+            finalized.Code,
+            finalized.Message,
+            finalized.RawValue);
+    }
+
+    private static bool TryBuildInventoryRuntimePlan(
+        string json,
+        out InventoryRuntimePlan plan,
+        out string error)
+    {
+        plan = new InventoryRuntimePlan(0, 0, false, null, Array.Empty<InventoryRuntimeItem>());
+        error = string.Empty;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                error = "Inventory projection payload must be a JSON object.";
+                return false;
+            }
+
+            var forcedCorrection = root.TryGetProperty("forcedCorrection", out var forcedNode)
+                && forcedNode.ValueKind is JsonValueKind.True;
+
+            long? currencyBalance = null;
+            if (root.TryGetProperty("currencyBalance", out var balanceNode)
+                && balanceNode.ValueKind == JsonValueKind.Number
+                && balanceNode.TryGetInt64(out var parsedBalance))
+            {
+                currencyBalance = parsedBalance;
+            }
+
+            var runtimeItems = new List<InventoryRuntimeItem>();
+            var totalItems = 0;
+            var unresolvedItems = 0;
+
+            if (root.TryGetProperty("containers", out var containersNode) && containersNode.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var container in containersNode.EnumerateArray())
+                {
+                    if (container.ValueKind != JsonValueKind.Object)
+                        continue;
+
+                    var containerId = container.TryGetProperty("containerId", out var containerIdNode)
+                        && containerIdNode.ValueKind == JsonValueKind.String
+                        ? containerIdNode.GetString() ?? "main"
+                        : "main";
+
+                    if (!container.TryGetProperty("items", out var itemsNode) || itemsNode.ValueKind != JsonValueKind.Array)
+                        continue;
+
+                    foreach (var itemNode in itemsNode.EnumerateArray())
+                    {
+                        if (itemNode.ValueKind != JsonValueKind.Object)
+                            continue;
+
+                        totalItems++;
+                        var quantity = itemNode.TryGetProperty("quantity", out var quantityNode)
+                            && quantityNode.ValueKind == JsonValueKind.Number
+                            && quantityNode.TryGetInt32(out var parsedQuantity)
+                            ? parsedQuantity
+                            : 1;
+                        if (quantity < 1)
+                            quantity = 1;
+
+                        var internalId = itemNode.TryGetProperty("internalId", out var internalIdNode)
+                            && internalIdNode.ValueKind == JsonValueKind.String
+                            ? internalIdNode.GetString() ?? string.Empty
+                            : string.Empty;
+
+                        if (!TryResolveRuntimeItemGuid(itemNode, out var runtimeItemGuid))
+                        {
+                            unresolvedItems++;
+                            continue;
+                        }
+
+                        runtimeItems.Add(new InventoryRuntimeItem(
+                            internalId,
+                            containerId,
+                            quantity,
+                            runtimeItemGuid));
+                    }
+                }
+            }
+
+            plan = new InventoryRuntimePlan(totalItems, unresolvedItems, forcedCorrection, currencyBalance, runtimeItems);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+            return false;
+        }
+    }
+
+    private static bool TryResolveRuntimeItemGuid(JsonElement itemNode, out string runtimeItemGuid)
+    {
+        runtimeItemGuid = string.Empty;
+        if (itemNode.TryGetProperty("metadata", out var metadataNode) && metadataNode.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var prop in metadataNode.EnumerateObject())
+            {
+                if (prop.Value.ValueKind != JsonValueKind.String)
+                    continue;
+
+                if (!string.Equals(prop.Name, "runtimeItemGuid", StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(prop.Name, "itemGuid", StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(prop.Name, "kcdItemGuid", StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(prop.Name, "guid", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var candidate = prop.Value.GetString();
+                if (!string.IsNullOrWhiteSpace(candidate) && Guid.TryParse(candidate, out _))
+                {
+                    runtimeItemGuid = candidate;
+                    return true;
+                }
+            }
+        }
+
+        if (itemNode.TryGetProperty("itemRef", out var itemRefNode) && itemRefNode.ValueKind == JsonValueKind.String)
+        {
+            var candidate = itemRefNode.GetString();
+            if (!string.IsNullOrWhiteSpace(candidate) && Guid.TryParse(candidate, out _))
+            {
+                runtimeItemGuid = candidate;
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private async Task<RuntimeProjectionApplyResult> InvokeRuntimeProjectionApplyAsync(string luaFunctionName, string safeJson)

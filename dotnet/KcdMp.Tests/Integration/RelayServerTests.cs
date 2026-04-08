@@ -314,6 +314,88 @@ public class RelayServerTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Client_ReceivesCanonicalInventoryProjectionPayload()
+    {
+        using var tcp = new TcpClient();
+        await tcp.ConnectAsync("127.0.0.1", TestPort);
+        var stream = tcp.GetStream();
+
+        await stream.WriteAsync(PacketWriter.Auth(TestPassword));
+        var authResponse = await stream.ReadPacketAsync();
+        Assert.Equal(PacketType.AuthResult, authResponse.Type);
+        Assert.True(PacketReader.ParseAuthResult(authResponse.Payload).ok);
+
+        await stream.WriteAsync(PacketWriter.Handshake("InventoryProjectionPlayer"));
+        var ackPacket = await stream.ReadPacketAsync();
+        Assert.Equal(PacketType.Ack, ackPacket.Type);
+
+        var projection = await WaitForStateProjectionAsync(
+            stream,
+            ProjectionDomain.Inventory,
+            TimeSpan.FromSeconds(5));
+        var payload = projection.Payload;
+
+        Assert.True(payload.TryGetProperty("characterId", out _));
+        Assert.True(payload.TryGetProperty("identityId", out _));
+        Assert.True(payload.TryGetProperty("revision", out var revisionNode));
+        Assert.Equal(JsonValueKind.Number, revisionNode.ValueKind);
+        Assert.True(payload.TryGetProperty("projectionReason", out var reasonNode));
+        Assert.Equal("initial_state", reasonNode.GetString());
+        Assert.True(payload.TryGetProperty("forcedCorrection", out var forcedNode));
+        Assert.Equal(JsonValueKind.False, forcedNode.ValueKind);
+        Assert.True(payload.TryGetProperty("containers", out var containersNode));
+        Assert.Equal(JsonValueKind.Array, containersNode.ValueKind);
+    }
+
+    [Fact]
+    public async Task InventoryProjection_PartialApply_TriggersForcedCorrectionProjection()
+    {
+        using var tcp = new TcpClient();
+        await tcp.ConnectAsync("127.0.0.1", TestPort);
+        var stream = tcp.GetStream();
+
+        await stream.WriteAsync(PacketWriter.Auth(TestPassword));
+        var authResponse = await stream.ReadPacketAsync();
+        Assert.Equal(PacketType.AuthResult, authResponse.Type);
+        Assert.True(PacketReader.ParseAuthResult(authResponse.Payload).ok);
+
+        await stream.WriteAsync(PacketWriter.Handshake("InventoryCorrectionPlayer"));
+        var ackPacket = await stream.ReadPacketAsync();
+        Assert.Equal(PacketType.Ack, ackPacket.Type);
+
+        var initialProjection = await WaitForStateProjectionAsync(
+            stream,
+            ProjectionDomain.Inventory,
+            TimeSpan.FromSeconds(5));
+        var domainRaw = (byte)ProjectionDomain.Inventory;
+
+        var started = PacketWriter.StateProjectionResult(
+            initialProjection.ProjectionId,
+            domainRaw,
+            (byte)ProjectionApplyStatus.Started,
+            """{"message":"started"}"""u8.ToArray());
+        await stream.WriteAsync(started);
+        var partial = PacketWriter.StateProjectionResult(
+            initialProjection.ProjectionId,
+            domainRaw,
+            (byte)ProjectionApplyStatus.PartiallyApplied,
+            """{"message":"partial"}"""u8.ToArray());
+        await stream.WriteAsync(partial);
+
+        var correctedProjection = await WaitForStateProjectionAsync(
+            stream,
+            ProjectionDomain.Inventory,
+            TimeSpan.FromSeconds(5),
+            payload =>
+                payload.TryGetProperty("forcedCorrection", out var forcedNode)
+                && forcedNode.ValueKind == JsonValueKind.True
+                && payload.TryGetProperty("projectionReason", out var reasonNode)
+                && string.Equals(reasonNode.GetString(), "inventory_partial_apply", StringComparison.Ordinal));
+
+        Assert.NotEqual(initialProjection.ProjectionId, correctedProjection.ProjectionId);
+    }
+
+    [Fact]
     public async Task PresenceProjection_IsBlockedUntilWorldInitializationCompletes()
     {
         const int port = TestPort + 10;
@@ -1037,6 +1119,34 @@ public class RelayServerTests : IAsyncLifetime
         throw new TimeoutException("Administrative invalidation projection not received within timeout.");
     }
 
+    private static async Task<ProjectionEnvelope> WaitForStateProjectionAsync(
+        NetworkStream stream,
+        ProjectionDomain domain,
+        TimeSpan timeout,
+        Func<JsonElement, bool>? predicate = null)
+    {
+        using var cts = new CancellationTokenSource(timeout);
+        while (!cts.Token.IsCancellationRequested)
+        {
+            var packet = await stream.ReadPacketAsync(cts.Token);
+            if (packet.Type != PacketType.StateProjection)
+                continue;
+
+            var (projectionId, domainRaw, _, payload) = PacketReader.ParseStateProjection(packet.Payload);
+            if (domainRaw != (byte)domain)
+                continue;
+
+            using var doc = JsonDocument.Parse(payload);
+            var root = doc.RootElement;
+            if (predicate is not null && !predicate(root))
+                continue;
+
+            return new ProjectionEnvelope(projectionId, domainRaw, root.Clone());
+        }
+
+        throw new TimeoutException($"State projection for domain {domain} not received within timeout.");
+    }
+
     private static async Task<JsonElement> WaitForPresenceProjectionAsync(
         NetworkStream stream,
         TimeSpan timeout,
@@ -1102,4 +1212,6 @@ public class RelayServerTests : IAsyncLifetime
         {
         }
     }
+
+    private sealed record ProjectionEnvelope(uint ProjectionId, byte DomainRaw, JsonElement Payload);
 }

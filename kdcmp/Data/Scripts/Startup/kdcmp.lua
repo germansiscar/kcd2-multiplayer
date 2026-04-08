@@ -2702,13 +2702,107 @@ function KCD2MP_ApplyLifecycleProjection(jsonStr)
     return _kcd2mp_projection_result("partial", "lifecycle_unknown_state", "Lifecycle state reflected with limited runtime mapping")
 end
 
+local function _kcd2mp_get_player_inventory()
+    if not player then
+        return nil, "player_missing"
+    end
+    if not player.inventory then
+        return nil, "player_inventory_unavailable"
+    end
+    return player.inventory, nil
+end
+
+function KCD2MP_ApplyInventoryClear(jsonStr)
+    local inventory, reason = _kcd2mp_get_player_inventory()
+    if not inventory then
+        return _kcd2mp_projection_result("failed", reason, "Unable to clear projected inventory")
+    end
+
+    local ok, clearErr = pcall(function()
+        inventory:RemoveAllItems()
+    end)
+    if not ok then
+        return _kcd2mp_projection_result("failed", "inventory_clear_failed", tostring(clearErr))
+    end
+
+    return _kcd2mp_projection_result("applied", "inventory_cleared", "Local inventory cleared before canonical projection")
+end
+
+function KCD2MP_ApplyInventoryItem(jsonStr)
+    local inventory, reason = _kcd2mp_get_player_inventory()
+    if not inventory then
+        return _kcd2mp_projection_result("failed", reason, "Unable to apply projected inventory item")
+    end
+
+    local itemGuid = _kcd2mp_read_json_string(jsonStr, "itemGuid")
+    local quantity = _kcd2mp_read_json_number(jsonStr, "quantity") or 1
+    if not itemGuid then
+        return _kcd2mp_projection_result("not_applicable", "missing_item_guid", "Projected item has no runtime guid")
+    end
+    if quantity < 1 then
+        return _kcd2mp_projection_result("not_applicable", "invalid_item_quantity", "Projected item quantity must be greater than zero")
+    end
+
+    local ok, addErr = pcall(function()
+        local item = ItemManager.CreateItem(itemGuid, quantity, 1)
+        if not item then
+            error("item_create_failed")
+        end
+        inventory:AddItem(item)
+    end)
+
+    if not ok then
+        return _kcd2mp_projection_result("failed", "inventory_item_add_failed", tostring(addErr))
+    end
+
+    return _kcd2mp_projection_result("applied", "inventory_item_applied", "Projected item added to local inventory")
+end
+
+function KCD2MP_FinalizeInventoryProjection(jsonStr)
+    local totalItems = _kcd2mp_read_json_number(jsonStr, "totalItems") or 0
+    local appliedItems = _kcd2mp_read_json_number(jsonStr, "appliedItems") or 0
+    local unresolvedItems = _kcd2mp_read_json_number(jsonStr, "unresolvedItems") or 0
+    local forcedCorrection = _kcd2mp_read_json_bool(jsonStr, "forcedCorrection")
+    if forcedCorrection == nil then forcedCorrection = false end
+
+    KCD2MP.serverProjectionState.inventoryStats = {
+        totalItems = totalItems,
+        appliedItems = appliedItems,
+        unresolvedItems = unresolvedItems,
+        forcedCorrection = forcedCorrection,
+        appliedAt = os.clock(),
+    }
+
+    local summary = string.format(
+        "Inventory projection total=%d applied=%d unresolved=%d forced=%s",
+        totalItems,
+        appliedItems,
+        unresolvedItems,
+        tostring(forcedCorrection))
+
+    if totalItems <= 0 then
+        return _kcd2mp_projection_result("applied", "inventory_projection_empty", summary)
+    end
+
+    if appliedItems <= 0 and unresolvedItems > 0 then
+        return _kcd2mp_projection_result("not_applicable", "inventory_items_not_projectable", summary)
+    end
+
+    if unresolvedItems > 0 then
+        return _kcd2mp_projection_result("partial", "inventory_projection_partial", summary)
+    end
+
+    return _kcd2mp_projection_result("applied", "inventory_projection_applied", summary)
+end
+
 function KCD2MP_ApplyInventoryProjection(jsonStr)
+    KCD2MP.serverProjectionState.inventoryPayload = jsonStr
     KCD2MP.serverProjectionState.inventory = jsonStr
     local reflectable = _kcd2mp_read_json_bool(jsonStr, "reflectable")
     if reflectable == false then
         return _kcd2mp_projection_result("not_applicable", "inventory_not_reflectable", "Inventory projection marked as not reflectable")
     end
-    return _kcd2mp_projection_result("partial", "inventory_summary_only", "Inventory canonical state is server-side; runtime stores summary")
+    return _kcd2mp_projection_result("applied", "inventory_projection_received", "Canonical inventory payload received")
 end
 
 function KCD2MP_ApplyCurrencyProjection(jsonStr)
@@ -2722,7 +2816,7 @@ function KCD2MP_ApplyCurrencyProjection(jsonStr)
     if not balance then
         return _kcd2mp_projection_result("not_applicable", "currency_missing_balance", "balance field not provided")
     end
-    return _kcd2mp_projection_result("partial", "currency_visual_only", "Currency reflected as UI message only")
+    return _kcd2mp_projection_result("applied", "currency_projection_applied", "Currency reflected from canonical projection")
 end
 
 function KCD2MP_ApplyAdministrativeProjection(jsonStr)
