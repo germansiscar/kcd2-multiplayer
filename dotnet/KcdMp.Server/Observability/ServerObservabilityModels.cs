@@ -129,6 +129,10 @@ public enum ServerObservableEventType
     CrimeStateUpdated = 106,
     CrimeAdminAction = 107,
     CrimeRegistrationFailed = 108,
+    EconomyTransferStarted = 109,
+    EconomyTransferDenied = 110,
+    EconomyTransferCompleted = 111,
+    EconomyTransferFailed = 112,
 }
 
 public sealed record ServerObservableEvent(

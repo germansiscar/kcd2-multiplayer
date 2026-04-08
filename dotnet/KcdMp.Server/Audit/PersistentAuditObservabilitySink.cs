@@ -272,7 +272,11 @@ public sealed class PersistentAuditObservabilitySink : IServerObservabilitySink
 
             ServerObservableEventType.CurrencyChanged or
             ServerObservableEventType.CurrencyValidationFailed or
-            ServerObservableEventType.CurrencySaveFailed => ServerAuditCategory.Currency,
+            ServerObservableEventType.CurrencySaveFailed or
+            ServerObservableEventType.EconomyTransferStarted or
+            ServerObservableEventType.EconomyTransferDenied or
+            ServerObservableEventType.EconomyTransferCompleted or
+            ServerObservableEventType.EconomyTransferFailed => ServerAuditCategory.Currency,
 
             ServerObservableEventType.DefeatDetected or
             ServerObservableEventType.UnconsciousEntered or
@@ -335,10 +339,14 @@ public sealed class PersistentAuditObservabilitySink : IServerObservabilitySink
             ServerObservableEventType.LootAccessConflict or
             ServerObservableEventType.LootExecutionFailed or
             ServerObservableEventType.LootDesyncIncident or
-            ServerObservableEventType.CurrencyChanged or
-            ServerObservableEventType.CurrencyValidationFailed or
-            ServerObservableEventType.CurrencySaveFailed or
-            ServerObservableEventType.DefeatDetected or
+             ServerObservableEventType.CurrencyChanged or
+             ServerObservableEventType.CurrencyValidationFailed or
+             ServerObservableEventType.CurrencySaveFailed or
+             ServerObservableEventType.EconomyTransferStarted or
+             ServerObservableEventType.EconomyTransferDenied or
+             ServerObservableEventType.EconomyTransferCompleted or
+             ServerObservableEventType.EconomyTransferFailed or
+             ServerObservableEventType.DefeatDetected or
             ServerObservableEventType.UnconsciousEntered or
             ServerObservableEventType.HealerRecoveryApplied or
             ServerObservableEventType.UnconsciousExpired or
@@ -381,6 +389,8 @@ public sealed class PersistentAuditObservabilitySink : IServerObservabilitySink
             ServerObservableEventType.LootDesyncIncident or
             ServerObservableEventType.CurrencyValidationFailed or
             ServerObservableEventType.CurrencySaveFailed or
+            ServerObservableEventType.EconomyTransferDenied or
+            ServerObservableEventType.EconomyTransferFailed or
             ServerObservableEventType.RespawnApplyFailed or
             ServerObservableEventType.RespawnSaveFailed or
             ServerObservableEventType.PersistenceLoadFailed or
