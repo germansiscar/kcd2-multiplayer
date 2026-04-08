@@ -133,6 +133,12 @@ public enum ServerObservableEventType
     EconomyTransferDenied = 110,
     EconomyTransferCompleted = 111,
     EconomyTransferFailed = 112,
+    InventoryProjectionStarted = 113,
+    InventoryProjectionCompleted = 114,
+    InventoryProjectionPartiallyApplied = 115,
+    InventoryProjectionFailed = 116,
+    InventoryProjectionDesyncDetected = 117,
+    InventoryProjectionForcedCorrection = 118,
 }
 
 public sealed record ServerObservableEvent(

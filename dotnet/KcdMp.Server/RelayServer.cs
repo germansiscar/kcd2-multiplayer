@@ -48,6 +48,9 @@ public class RelayServer
     private readonly ILogger _logger;
     private readonly IServerObservabilitySink _observability;
     private readonly Dictionary<uint, PendingStateProjection> _pendingProjections = [];
+    private readonly Dictionary<Guid, long> _inventoryProjectionRevisionBySession = [];
+    private readonly Dictionary<Guid, DateTimeOffset> _inventoryCorrectionLastAttemptBySession = [];
+    private readonly Dictionary<Guid, int> _inventoryCorrectionAttemptBySession = [];
     private readonly bool _worldInitEnabled;
     private readonly int _worldInitMaxRetries;
     private readonly bool _worldInitBlockOnCriticalFailure;
@@ -735,6 +738,19 @@ public class RelayServer
             return;
         }
 
+        await SendCanonicalInventoryProjectionAsync(
+            source,
+            senderSession,
+            projectionReason: "economy_transfer_sender",
+            forcedCorrection: false,
+            ct);
+        await SendCanonicalInventoryProjectionAsync(
+            target.Client,
+            receiverSession,
+            projectionReason: "economy_transfer_receiver",
+            forcedCorrection: false,
+            ct);
+
         var senderName = string.IsNullOrWhiteSpace(senderCharacter.FullName) ? source.Name ?? "Unknown" : senderCharacter.FullName;
         await SendSystemChatAsync(
             source,
@@ -1110,8 +1126,6 @@ public class RelayServer
         var character = !string.IsNullOrWhiteSpace(session.CharacterId)
             ? await _characterProfileService.GetByInternalIdAsync(session.CharacterId!, ct)
             : null;
-        var inventory = await _characterInventoryService.GetLoadedForSessionAsync(sessionId, ct);
-        var currency = await _characterCurrencyService.GetLoadedForSessionAsync(sessionId, ct);
         var respawn = await _characterRespawnService.GetLoadedForSessionAsync(sessionId, ct);
 
         SendStateProjection(
@@ -1178,34 +1192,12 @@ public class RelayServer
             },
             retryable: true);
 
-        SendStateProjection(
+        await SendCanonicalInventoryProjectionAsync(
             client,
-            sessionId,
-            ProjectionDomain.Inventory,
-            ProjectionApplicability.Partial,
-            new
-            {
-                characterId = session.CharacterId,
-                containerCount = inventory?.Containers.Count ?? 0,
-                totalItems = inventory?.Containers.Sum(x => x.Items.Count) ?? 0,
-                reflectable = true,
-                note = "Server inventory is canonical. Client/game reflection can be partial.",
-            },
-            retryable: true);
-
-        SendStateProjection(
-            client,
-            sessionId,
-            ProjectionDomain.Currency,
-            ProjectionApplicability.Partial,
-            new
-            {
-                characterId = session.CharacterId,
-                balance = currency?.Balance ?? 0,
-                reflectable = true,
-                note = "Server currency is canonical. Client/game reflection can be partial.",
-            },
-            retryable: true);
+            session,
+            projectionReason: "initial_state",
+            forcedCorrection: false,
+            ct);
 
         SendStateProjection(
             client,
@@ -1516,6 +1508,16 @@ public class RelayServer
                         sessionId,
                         payload);
                 }
+                else if (domain is ProjectionDomain.Inventory or ProjectionDomain.Currency)
+                {
+                    Emit(
+                        ServerObservableEventType.InventoryProjectionStarted,
+                        ServerObservableComponent.ClientIntegration,
+                        ServerObservableSeverity.Information,
+                        "Inventory projection apply started.",
+                        sessionId,
+                        payload);
+                }
                 return;
 
             case ProjectionApplyStatus.Applied:
@@ -1537,6 +1539,20 @@ public class RelayServer
                         sessionId,
                         payload);
                     _ = ProjectPresenceSnapshotToAllReadyAsync("world_init_completed", sessionId);
+                }
+                else if (domain is ProjectionDomain.Inventory or ProjectionDomain.Currency)
+                {
+                    lock (_lock)
+                    {
+                        _inventoryCorrectionAttemptBySession[sessionId] = 0;
+                    }
+                    Emit(
+                        ServerObservableEventType.InventoryProjectionCompleted,
+                        ServerObservableComponent.ClientIntegration,
+                        ServerObservableSeverity.Information,
+                        "Inventory projection apply completed.",
+                        sessionId,
+                        payload);
                 }
                 break;
 
@@ -1576,6 +1592,24 @@ public class RelayServer
                 {
                     MarkWorldInitializationReady(sessionId, isReady: true);
                     _ = ProjectPresenceSnapshotToAllReadyAsync("world_init_partial", sessionId);
+                }
+                else if (domain is ProjectionDomain.Inventory or ProjectionDomain.Currency)
+                {
+                    Emit(
+                        ServerObservableEventType.InventoryProjectionPartiallyApplied,
+                        ServerObservableComponent.ClientIntegration,
+                        ServerObservableSeverity.Warning,
+                        "Inventory projection was only partially applied.",
+                        sessionId,
+                        payload);
+                    Emit(
+                        ServerObservableEventType.InventoryProjectionDesyncDetected,
+                        ServerObservableComponent.ClientIntegration,
+                        ServerObservableSeverity.Warning,
+                        "Inventory projection desync detected after partial apply.",
+                        sessionId,
+                        payload);
+                    RequestInventoryProjectionCorrection(sessionId, "inventory_partial_apply");
                 }
                 break;
 
@@ -1624,6 +1658,24 @@ public class RelayServer
                         "Presence projection apply failed and generated a desync incident.",
                         sessionId,
                         payload);
+                }
+                else if (domain is ProjectionDomain.Inventory or ProjectionDomain.Currency)
+                {
+                    Emit(
+                        ServerObservableEventType.InventoryProjectionFailed,
+                        ServerObservableComponent.ClientIntegration,
+                        ServerObservableSeverity.Warning,
+                        "Inventory projection apply failed.",
+                        sessionId,
+                        payload);
+                    Emit(
+                        ServerObservableEventType.InventoryProjectionDesyncDetected,
+                        ServerObservableComponent.ClientIntegration,
+                        ServerObservableSeverity.Warning,
+                        "Inventory projection desync detected after apply failure.",
+                        sessionId,
+                        payload);
+                    RequestInventoryProjectionCorrection(sessionId, "inventory_apply_failed");
                 }
                 break;
         }
@@ -1753,6 +1805,159 @@ public class RelayServer
         CancellationToken ct = default)
     {
         return _identityBanService.RevokeActiveBanAsync(request, null, ct);
+    }
+
+    private async Task SendCanonicalInventoryProjectionAsync(
+        ClientSession client,
+        ServerSessionRecord session,
+        string projectionReason,
+        bool forcedCorrection,
+        CancellationToken ct = default)
+    {
+        if (!forcedCorrection)
+        {
+            lock (_lock)
+            {
+                _inventoryCorrectionAttemptBySession[session.SessionId] = 0;
+            }
+        }
+
+        var inventory = await _characterInventoryService.GetLoadedForSessionAsync(session.SessionId, ct);
+        var currency = await _characterCurrencyService.GetLoadedForSessionAsync(session.SessionId, ct);
+        var revision = NextInventoryProjectionRevision(session.SessionId);
+        var totalItems = inventory?.Containers.Sum(x => x.Items.Count) ?? 0;
+        var balance = currency?.Balance ?? 0;
+
+        var inventoryPayload = new
+        {
+            characterId = session.CharacterId,
+            identityId = session.IdentityId,
+            revision,
+            projectionReason,
+            forcedCorrection,
+            reflectable = true,
+            currencyBalance = balance,
+            containerCount = inventory?.Containers.Count ?? 0,
+            totalItems,
+            containers = inventory?.Containers.Select(container => new
+            {
+                containerId = container.ContainerId,
+                containerType = container.ContainerType.ToString(),
+                displayName = container.DisplayName,
+                metadata = container.Metadata,
+                updatedAtUtc = container.UpdatedAtUtc,
+                items = container.Items.Select(item => new
+                {
+                    internalId = item.InternalId,
+                    itemType = item.ItemType,
+                    itemRef = item.ItemRef,
+                    quantity = item.Quantity,
+                    isStackable = item.IsStackable,
+                    flags = item.Flags,
+                    metadata = item.Metadata,
+                }),
+            }),
+        };
+
+        SendStateProjection(
+            client,
+            session.SessionId,
+            ProjectionDomain.Inventory,
+            ProjectionApplicability.Direct,
+            inventoryPayload,
+            retryable: false);
+
+        var currencyPayload = new
+        {
+            characterId = session.CharacterId,
+            identityId = session.IdentityId,
+            revision,
+            projectionReason,
+            forcedCorrection,
+            balance,
+            reflectable = true,
+            note = "Server currency is canonical.",
+        };
+
+        SendStateProjection(
+            client,
+            session.SessionId,
+            ProjectionDomain.Currency,
+            ProjectionApplicability.Direct,
+            currencyPayload,
+            retryable: false);
+    }
+
+    private long NextInventoryProjectionRevision(Guid sessionId)
+    {
+        lock (_lock)
+        {
+            _inventoryProjectionRevisionBySession.TryGetValue(sessionId, out var current);
+            var next = current + 1;
+            if (next <= 0)
+                next = 1;
+
+            _inventoryProjectionRevisionBySession[sessionId] = next;
+            return next;
+        }
+    }
+
+    private void RequestInventoryProjectionCorrection(Guid sessionId, string reasonCode)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(120);
+
+                ClientSession? client;
+                lock (_lock)
+                {
+                    _clientsBySessionId.TryGetValue(sessionId, out client);
+                    if (_inventoryCorrectionLastAttemptBySession.TryGetValue(sessionId, out var lastAttempt)
+                        && (DateTimeOffset.UtcNow - lastAttempt) < TimeSpan.FromSeconds(2))
+                    {
+                        return;
+                    }
+
+                    _inventoryCorrectionAttemptBySession.TryGetValue(sessionId, out var attempts);
+                    if (attempts >= 3)
+                        return;
+
+                    _inventoryCorrectionLastAttemptBySession[sessionId] = DateTimeOffset.UtcNow;
+                    _inventoryCorrectionAttemptBySession[sessionId] = attempts + 1;
+                }
+
+                if (client is null || !client.IsReady)
+                    return;
+
+                var session = _sessionBackend.GetActiveSessions().FirstOrDefault(x => x.SessionId == sessionId);
+                if (session is null)
+                    return;
+
+                Emit(
+                    ServerObservableEventType.InventoryProjectionForcedCorrection,
+                    ServerObservableComponent.ClientIntegration,
+                    ServerObservableSeverity.Warning,
+                    "Server requested forced correction for inventory projection.",
+                    sessionId,
+                    payload: new Dictionary<string, object?>
+                    {
+                        ["reason_code"] = reasonCode,
+                    });
+
+                await SendCanonicalInventoryProjectionAsync(
+                    client,
+                    session,
+                    projectionReason: reasonCode,
+                    forcedCorrection: true,
+                    CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                EmitBackendError(sessionId, "Failed to schedule forced inventory correction.", ex);
+            }
+        });
     }
 
     private void SendStateProjection(
@@ -1889,6 +2094,9 @@ public class RelayServer
     {
         lock (_lock)
         {
+            _inventoryProjectionRevisionBySession.Remove(sessionId);
+            _inventoryCorrectionLastAttemptBySession.Remove(sessionId);
+            _inventoryCorrectionAttemptBySession.Remove(sessionId);
             var stale = _pendingProjections
                 .Where(x => x.Value.SessionId == sessionId)
                 .Select(x => x.Key)

@@ -262,6 +262,12 @@ public sealed class PersistentAuditObservabilitySink : IServerObservabilitySink
             ServerObservableEventType.InventoryChanged or
             ServerObservableEventType.InventoryValidationFailed or
             ServerObservableEventType.InventorySaveFailed or
+            ServerObservableEventType.InventoryProjectionStarted or
+            ServerObservableEventType.InventoryProjectionCompleted or
+            ServerObservableEventType.InventoryProjectionPartiallyApplied or
+            ServerObservableEventType.InventoryProjectionFailed or
+            ServerObservableEventType.InventoryProjectionDesyncDetected or
+            ServerObservableEventType.InventoryProjectionForcedCorrection or
             ServerObservableEventType.LootStarted or
             ServerObservableEventType.LootAllowed or
             ServerObservableEventType.LootDenied or
@@ -332,6 +338,12 @@ public sealed class PersistentAuditObservabilitySink : IServerObservabilitySink
             ServerObservableEventType.InventoryChanged or
             ServerObservableEventType.InventoryValidationFailed or
             ServerObservableEventType.InventorySaveFailed or
+            ServerObservableEventType.InventoryProjectionStarted or
+            ServerObservableEventType.InventoryProjectionCompleted or
+            ServerObservableEventType.InventoryProjectionPartiallyApplied or
+            ServerObservableEventType.InventoryProjectionFailed or
+            ServerObservableEventType.InventoryProjectionDesyncDetected or
+            ServerObservableEventType.InventoryProjectionForcedCorrection or
             ServerObservableEventType.LootStarted or
             ServerObservableEventType.LootAllowed or
             ServerObservableEventType.LootDenied or
@@ -383,6 +395,9 @@ public sealed class PersistentAuditObservabilitySink : IServerObservabilitySink
             ServerObservableEventType.CharacterSaveFailed or
             ServerObservableEventType.InventoryValidationFailed or
             ServerObservableEventType.InventorySaveFailed or
+            ServerObservableEventType.InventoryProjectionPartiallyApplied or
+            ServerObservableEventType.InventoryProjectionFailed or
+            ServerObservableEventType.InventoryProjectionDesyncDetected or
             ServerObservableEventType.LootDenied or
             ServerObservableEventType.LootAccessConflict or
             ServerObservableEventType.LootExecutionFailed or
