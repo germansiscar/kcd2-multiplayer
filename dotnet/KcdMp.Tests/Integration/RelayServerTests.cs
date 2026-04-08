@@ -3,6 +3,7 @@ using System.Text.Json;
 using KcdMp.Server.AccessControl;
 using KcdMp.Server.Bans;
 using KcdMp.Server.Characters;
+using KcdMp.Server.Currency;
 using KcdMp.Server.Identity;
 using KcdMp.Server.Persistence;
 using KcdMp.Shared.Protocol;
@@ -188,6 +189,53 @@ public class RelayServerTests : IAsyncLifetime
         var payload = System.Text.Encoding.UTF8.GetString(parsedJson);
         Assert.Contains("\"scope\":\"system\"", payload, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("invalido", payload, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Client_SendsPayCommand_TargetInRange_TransferIsApplied()
+    {
+        const int port = TestPort + 11;
+        var root = Path.Combine(Path.GetTempPath(), $"kcdmp_relay_pay_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        using var cts = new CancellationTokenSource();
+
+        var server = new KcdMp.Server.RelayServer(
+            port,
+            password: TestPassword,
+            persistenceOptions: new JsonPersistenceOptions { BasePath = root },
+            characterCurrencyOptions: new CharacterCurrencyOptions { InitialBalance = 100 },
+            worldInitEnabled: false);
+        var task = server.RunAsync(cts.Token);
+        await Task.Delay(200);
+
+        try
+        {
+            var (tcpAlice, streamAlice, _) = await ConnectClientAtPortAsync(port, "AlicePay");
+            var (tcpBob, streamBob, _) = await ConnectClientAtPortAsync(port, "BobPay");
+            using var _ = tcpAlice;
+            using var __ = tcpBob;
+
+            await DrainPacketsAsync(streamAlice, 1);
+            await DrainPacketsAsync(streamBob, 1);
+
+            await streamAlice.WriteAsync(PacketWriter.Position(100f, 100f, 0f, 0f, isRiding: false));
+            await streamBob.WriteAsync(PacketWriter.Position(101f, 100f, 0f, 0f, isRiding: false));
+            await Task.Delay(100);
+
+            var pay = """{"text":"/pay BobPay 30"}"""u8.ToArray();
+            await streamAlice.WriteAsync(PacketWriter.Event((ushort)EventType.ChatSubmit, pay));
+
+            var senderMessage = await WaitForChatMessageContainingAsync(streamAlice, "Transferencia completada", TimeSpan.FromSeconds(3));
+            var receiverMessage = await WaitForChatMessageContainingAsync(streamBob, "te envio 30 monedas", TimeSpan.FromSeconds(3));
+            Assert.Contains("Saldo: 70", senderMessage, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("Saldo: 130", receiverMessage, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            cts.Cancel();
+            try { await task; } catch { }
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     [Fact]
@@ -907,6 +955,24 @@ public class RelayServerTests : IAsyncLifetime
         return (tcp, stream, id);
     }
 
+    private async Task<(TcpClient tcp, NetworkStream stream, byte id)> ConnectClientAtPortAsync(int port, string name)
+    {
+        var tcp = new TcpClient();
+        await tcp.ConnectAsync("127.0.0.1", port);
+        var stream = tcp.GetStream();
+
+        await stream.WriteAsync(PacketWriter.Auth(TestPassword));
+        var authResponse = await stream.ReadPacketAsync();
+        Assert.Equal(PacketType.AuthResult, authResponse.Type);
+
+        await stream.WriteAsync(PacketWriter.Handshake(name));
+        var ackPacket = await stream.ReadPacketAsync();
+        Assert.Equal(PacketType.Ack, ackPacket.Type);
+        byte id = ackPacket.Payload[0];
+
+        return (tcp, stream, id);
+    }
+
     private async Task DrainPacketsAsync(NetworkStream stream, int count)
     {
         for (int i = 0; i < count; i++)
@@ -927,6 +993,27 @@ public class RelayServerTests : IAsyncLifetime
         }
 
         throw new TimeoutException($"Packet type {expectedType} not received within timeout.");
+    }
+
+    private static async Task<string> WaitForChatMessageContainingAsync(NetworkStream stream, string needle, TimeSpan timeout)
+    {
+        using var cts = new CancellationTokenSource(timeout);
+        while (!cts.Token.IsCancellationRequested)
+        {
+            var packet = await stream.ReadPacketAsync(cts.Token);
+            if (packet.Type != PacketType.EventRelay)
+                continue;
+
+            var (_, eventType, payload) = PacketReader.ParseEventRelay(packet.Payload);
+            if (eventType != (ushort)EventType.ChatMessage)
+                continue;
+
+            var json = System.Text.Encoding.UTF8.GetString(payload);
+            if (json.Contains(needle, StringComparison.OrdinalIgnoreCase))
+                return json;
+        }
+
+        throw new TimeoutException($"Chat message containing '{needle}' was not received.");
     }
 
     private static async Task<string> ReadAdministrativeInvalidationProjectionAsync(NetworkStream stream, TimeSpan timeout)

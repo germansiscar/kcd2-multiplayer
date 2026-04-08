@@ -10,6 +10,7 @@ using KcdMp.Server.Characters;
 using KcdMp.Server.Communication;
 using KcdMp.Server.Crime;
 using KcdMp.Server.Currency;
+using KcdMp.Server.Economy;
 using KcdMp.Server.Identity;
 using KcdMp.Server.Inventory;
 using KcdMp.Server.InventoryRules;
@@ -36,6 +37,7 @@ public class RelayServer
     private readonly ICharacterLifecycleService _characterLifecycleService;
     private readonly ICharacterInventoryService _characterInventoryService;
     private readonly ICharacterCurrencyService _characterCurrencyService;
+    private readonly IEconomyAppliedService _economyService;
     private readonly ICharacterRespawnService _characterRespawnService;
     private readonly IInventoryRulesConfigurationService _inventoryRulesService;
     private readonly ICrimeLawService _crimeLawService;
@@ -73,6 +75,7 @@ public class RelayServer
         CharacterLifecycleOptions? characterLifecycleOptions = null,
         CharacterInventoryOptions? characterInventoryOptions = null,
         CharacterCurrencyOptions? characterCurrencyOptions = null,
+        EconomyAppliedOptions? economyOptions = null,
         CharacterRespawnOptions? characterRespawnOptions = null,
         InventoryRulesOptions? inventoryRulesOptions = null,
         CrimeLawOptions? crimeLawOptions = null,
@@ -89,6 +92,7 @@ public class RelayServer
         ICharacterLifecycleService? characterLifecycleService = null,
         ICharacterInventoryService? characterInventoryService = null,
         ICharacterCurrencyService? characterCurrencyService = null,
+        IEconomyAppliedService? economyService = null,
         ICharacterRespawnService? characterRespawnService = null,
         IInventoryRulesConfigurationService? inventoryRulesService = null,
         ICrimeLawService? crimeLawService = null,
@@ -175,6 +179,13 @@ public class RelayServer
                                         _observability,
                                         characterCurrencyOptions,
                                         _logger);
+        _economyService = economyService
+                          ?? new EconomyAppliedService(
+                              _characterInventoryService,
+                              _characterCurrencyService,
+                              _observability,
+                              economyOptions,
+                              _logger);
         _characterRespawnService = characterRespawnService
                                    ?? new CharacterRespawnService(
                                        store,
@@ -554,6 +565,12 @@ public class RelayServer
             return;
         }
 
+        if (command.Kind == ChatCommandKind.PayDirect)
+        {
+            await HandlePayDirectCommandAsync(source, command, senderSpatial, senderSession, character, ct);
+            return;
+        }
+
         var senderZone = senderSpatial is null ? null : ComputeZoneKey(senderSpatial.X, senderSpatial.Y);
         var senderName = string.IsNullOrWhiteSpace(character.FullName) ? source.Name ?? "Unknown" : character.FullName;
         IReadOnlyList<ClientSession> recipients;
@@ -642,6 +659,107 @@ public class RelayServer
             command.Channel,
             recipients.Count,
             null);
+    }
+
+    private async Task HandlePayDirectCommandAsync(
+        ClientSession source,
+        ChatCommand command,
+        PresenceSpatialSnapshot? senderSpatial,
+        ServerSessionRecord senderSession,
+        CharacterProfileRecord senderCharacter,
+        CancellationToken ct)
+    {
+        if (!command.Amount.HasValue || command.Amount.Value <= 0)
+        {
+            await SendSystemChatAsync(source, "Uso: /pay <jugador> <cantidad>", "economy_transfer_invalid_amount");
+            EmitChatEvent(ServerObservableEventType.ChatMessageRejected, source.SessionId, source.Id, "economy_transfer_invalid_amount", null, null);
+            return;
+        }
+
+        var target = await ResolveWhisperTargetAsync(source.SessionId, command.TargetHint ?? "", ct);
+        if (target is null)
+        {
+            await SendSystemChatAsync(source, "Jugador objetivo no encontrado para /pay.", "economy_transfer_target_missing");
+            EmitChatEvent(ServerObservableEventType.ChatMessageRejected, source.SessionId, source.Id, "economy_transfer_target_missing", null, null);
+            return;
+        }
+
+        if (senderSpatial is null || target.Spatial is null)
+        {
+            await SendSystemChatAsync(source, "No hay contexto espacial valido para /pay.", "economy_transfer_presence_missing");
+            EmitChatEvent(ServerObservableEventType.ChatMessageRejected, source.SessionId, source.Id, "economy_transfer_presence_missing", null, null);
+            return;
+        }
+
+        var sameZone = string.Equals(
+            ComputeZoneKey(senderSpatial.X, senderSpatial.Y),
+            ComputeZoneKey(target.Spatial.X, target.Spatial.Y),
+            StringComparison.Ordinal);
+        var distance = ComputeDistance(senderSpatial, target.Spatial);
+        if (!sameZone)
+        {
+            await SendSystemChatAsync(source, "El objetivo de /pay esta fuera de zona de interaccion.", "economy_transfer_out_of_zone");
+            EmitChatEvent(ServerObservableEventType.ChatMessageRejected, source.SessionId, source.Id, "economy_transfer_out_of_zone", null, distance);
+            return;
+        }
+
+        var receiverSession = _sessionBackend.GetActiveSessions().FirstOrDefault(x => x.SessionId == target.Client.SessionId);
+        if (receiverSession is null
+            || string.IsNullOrWhiteSpace(receiverSession.IdentityId)
+            || string.IsNullOrWhiteSpace(receiverSession.CharacterId))
+        {
+            await SendSystemChatAsync(source, "El objetivo no tiene contexto de sesion valido para /pay.", "economy_transfer_target_context_missing");
+            EmitChatEvent(ServerObservableEventType.ChatMessageRejected, source.SessionId, source.Id, "economy_transfer_target_context_missing", null, distance);
+            return;
+        }
+
+        var result = await _economyService.TransferDirectAsync(
+            new EconomyDirectTransferRequest(
+                SenderSessionId: source.SessionId,
+                ReceiverSessionId: target.Client.SessionId,
+                SenderIdentityId: senderSession.IdentityId!,
+                SenderCharacterId: senderSession.CharacterId!,
+                ReceiverIdentityId: receiverSession.IdentityId!,
+                ReceiverCharacterId: receiverSession.CharacterId!,
+                Amount: command.Amount.Value,
+                DistanceMeters: distance),
+            ct);
+
+        if (!result.Applied)
+        {
+            await SendSystemChatAsync(
+                source,
+                $"Transferencia rechazada: {result.DenialReason ?? "motivo no especificado"}.",
+                "economy_transfer_rejected");
+            EmitChatEvent(ServerObservableEventType.ChatMessageRejected, source.SessionId, source.Id, "economy_transfer_rejected", 1, distance);
+            return;
+        }
+
+        var senderName = string.IsNullOrWhiteSpace(senderCharacter.FullName) ? source.Name ?? "Unknown" : senderCharacter.FullName;
+        await SendSystemChatAsync(
+            source,
+            $"Transferencia completada: {command.Amount.Value} monedas enviadas a {target.CharacterName}. Saldo: {result.SenderBalance}.",
+            "economy_transfer_success");
+        await SendSystemChatAsync(
+            target.Client,
+            $"{senderName} te envio {command.Amount.Value} monedas. Saldo: {result.ReceiverBalance}.",
+            "economy_transfer_received");
+
+        EmitChatEvent(
+            ServerObservableEventType.ChatMessageAccepted,
+            source.SessionId,
+            source.Id,
+            "economy_transfer",
+            2,
+            distance,
+            text: $"{command.TargetHint}:{command.Amount.Value}");
+        EmitChatEvent(
+            ServerObservableEventType.ChatMessageDelivered,
+            source.SessionId,
+            source.Id,
+            "economy_transfer",
+            2,
+            distance);
     }
 
     public IReadOnlyList<ServerSessionRecord> GetActiveSessions()
@@ -854,6 +972,41 @@ public class RelayServer
                         ["reason"] = currencyLoad.DenialReason,
                     });
                 return (false, currencyLoad.DenialReason ?? "Currency load failed.", resolved.Identity.InternalId);
+            }
+
+            var economySync = await _economyService.EnsureMoneyObjectForSessionAsync(
+                sessionId,
+                resolved.Identity.InternalId,
+                binding.CharacterId!,
+                ct);
+            if (!economySync.Applied)
+            {
+                await _characterCurrencyService.SaveAndUnloadSessionAsync(
+                    sessionId,
+                    CharacterLifecycleSaveReason.SessionClosed,
+                    ct);
+                await _characterInventoryService.SaveAndUnloadSessionAsync(
+                    sessionId,
+                    CharacterLifecycleSaveReason.SessionClosed,
+                    ct);
+                await _characterLifecycleService.SaveAndUnloadSessionAsync(
+                    sessionId,
+                    CharacterLifecycleSaveReason.SessionClosed,
+                    ct);
+                _sessionBackend.ClearIdentityAssociation(sessionId);
+                Emit(
+                    ServerObservableEventType.CurrencyLoadFailed,
+                    ServerObservableComponent.Session,
+                    ServerObservableSeverity.Warning,
+                    "Economy money object synchronization failed while preparing session.",
+                    sessionId,
+                    payload: new Dictionary<string, object?>
+                    {
+                        ["identity_id"] = resolved.Identity.InternalId,
+                        ["character_id"] = binding.CharacterId,
+                        ["reason"] = economySync.DenialReason,
+                    });
+                return (false, economySync.DenialReason ?? "Economy money object synchronization failed.", resolved.Identity.InternalId);
             }
 
             var respawnLoad = await _characterRespawnService.LoadForSessionAsync(
@@ -2048,6 +2201,25 @@ public class RelayServer
                     ? ChatCommand.Invalid()
                     : new ChatCommand(ChatCommandKind.System, ChatScope.System, ChatProximityMode.Normal, "system", content, null, AllowedWhileUnconscious: true, RequiresSpatialContext: false);
             }
+            case "/pay":
+            {
+                if (parts.Length < 3)
+                    return ChatCommand.Invalid();
+
+                if (!long.TryParse(parts[2], out var amount))
+                    return ChatCommand.Invalid();
+
+                return new ChatCommand(
+                    ChatCommandKind.PayDirect,
+                    ChatScope.Direct,
+                    ChatProximityMode.Whisper,
+                    "economy_transfer",
+                    Content: string.Empty,
+                    TargetHint: parts[1].Trim(),
+                    AllowedWhileUnconscious: false,
+                    RequiresSpatialContext: true,
+                    Amount: amount);
+            }
             default:
                 return ChatCommand.Invalid();
         }
@@ -2292,6 +2464,7 @@ public class RelayServer
         Ooc = 7,
         WhisperDirect = 8,
         System = 9,
+        PayDirect = 10,
     }
 
     private enum ChatScope
@@ -2317,10 +2490,11 @@ public class RelayServer
         string Content,
         string? TargetHint,
         bool AllowedWhileUnconscious,
-        bool RequiresSpatialContext)
+        bool RequiresSpatialContext,
+        long? Amount = null)
     {
         public static ChatCommand Invalid()
-            => new(ChatCommandKind.Invalid, ChatScope.Proximity, ChatProximityMode.Normal, "invalid", string.Empty, null, false, false);
+            => new(ChatCommandKind.Invalid, ChatScope.Proximity, ChatProximityMode.Normal, "invalid", string.Empty, null, false, false, null);
     }
 
     private sealed record WhisperTarget(
