@@ -33,6 +33,12 @@ public class KcdmpConfigTests
         Assert.Equal("default_spawn", config.RespawnDefaultPointId);
         Assert.Equal(1, config.RespawnSaveRetryCount);
         Assert.Equal(100, config.RespawnSaveRetryDelayMs);
+        Assert.Equal(3600, config.CrimeWantedDurationSeconds);
+        Assert.Equal(3, config.CrimeDedupWindowSeconds);
+        Assert.Equal(256, config.CrimeMaxEventsPerCharacter);
+        Assert.True(config.CrimeAutoDetectConsciousCharacterTheft);
+        Assert.True(config.CrimeAutoDetectUnconsciousCharacterLoot);
+        Assert.True(config.CrimeAutoDetectUnauthorizedContainerAccess);
         Assert.True(config.AuditEnabled);
         Assert.Equal(30, config.AuditRetentionDays);
     }
@@ -64,6 +70,13 @@ public class KcdmpConfigTests
             RespawnDefaultPointId = "rattay_square",
             RespawnSaveRetryCount = 2,
             RespawnSaveRetryDelayMs = 250,
+            CrimeWantedDurationSeconds = 1800,
+            CrimeDedupWindowSeconds = 6,
+            CrimeMaxEventsPerCharacter = 120,
+            CrimeAutoDetectConsciousCharacterTheft = true,
+            CrimeAutoDetectUnconsciousCharacterLoot = true,
+            CrimeAutoDetectUnauthorizedContainerAccess = false,
+            CrimeConfiguredIllegalActions = ["lockpick_forbidden", "contraband_transfer"],
             AuditEnabled = true,
             AuditRetentionDays = 45,
         };
@@ -91,6 +104,13 @@ public class KcdmpConfigTests
         Assert.Equal("rattay_square", loaded.RespawnDefaultPointId);
         Assert.Equal(2, loaded.RespawnSaveRetryCount);
         Assert.Equal(250, loaded.RespawnSaveRetryDelayMs);
+        Assert.Equal(1800, loaded.CrimeWantedDurationSeconds);
+        Assert.Equal(6, loaded.CrimeDedupWindowSeconds);
+        Assert.Equal(120, loaded.CrimeMaxEventsPerCharacter);
+        Assert.True(loaded.CrimeAutoDetectConsciousCharacterTheft);
+        Assert.True(loaded.CrimeAutoDetectUnconsciousCharacterLoot);
+        Assert.False(loaded.CrimeAutoDetectUnauthorizedContainerAccess);
+        Assert.Equal(2, loaded.CrimeConfiguredIllegalActions.Count);
         Assert.True(loaded.AuditEnabled);
         Assert.Equal(45, loaded.AuditRetentionDays);
     }

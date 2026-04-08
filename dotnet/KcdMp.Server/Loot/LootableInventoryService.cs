@@ -1,4 +1,5 @@
 using KcdMp.Server.Characters;
+using KcdMp.Server.Crime;
 using KcdMp.Server.Currency;
 using KcdMp.Server.Inventory;
 using KcdMp.Server.InventoryRules;
@@ -16,6 +17,7 @@ public sealed class LootableInventoryService : ILootableInventoryService
     private readonly ICharacterCurrencyService _currency;
     private readonly ICharacterRespawnService _respawn;
     private readonly IInventoryRulesConfigurationService _inventoryRules;
+    private readonly ICrimeLawService _crimeLaw;
     private readonly IServerObservabilitySink _observability;
     private readonly LootableInventoryOptions _options;
     private readonly ILogger _logger;
@@ -28,6 +30,7 @@ public sealed class LootableInventoryService : ILootableInventoryService
         ICharacterCurrencyService currency,
         ICharacterRespawnService respawn,
         IInventoryRulesConfigurationService inventoryRules,
+        ICrimeLawService? crimeLaw,
         IServerObservabilitySink observability,
         LootableInventoryOptions? options = null,
         ILogger? logger = null)
@@ -37,6 +40,7 @@ public sealed class LootableInventoryService : ILootableInventoryService
         _currency = currency ?? throw new ArgumentNullException(nameof(currency));
         _respawn = respawn ?? throw new ArgumentNullException(nameof(respawn));
         _inventoryRules = inventoryRules ?? throw new ArgumentNullException(nameof(inventoryRules));
+        _crimeLaw = crimeLaw ?? new NoOpCrimeLawService();
         _observability = observability ?? throw new ArgumentNullException(nameof(observability));
         _options = options ?? new LootableInventoryOptions();
         _logger = logger ?? Log.Logger;
@@ -195,6 +199,19 @@ public sealed class LootableInventoryService : ILootableInventoryService
                 request.Quantity,
                 currencyAmount: null);
 
+            await RegisterCharacterLootCrimeAsync(
+                request.LooterSessionId,
+                request.LooterIdentityId,
+                request.LooterCharacterId,
+                request.TargetIdentityId,
+                request.TargetCharacterId,
+                targetEligibility.targetState,
+                targetKind: CrimeTargetKind.Character,
+                targetId: request.TargetCharacterId,
+                actionCode: "loot_character_item",
+                reason: null,
+                ct);
+
             return new LootTransferResult(
                 true,
                 null,
@@ -309,6 +326,19 @@ public sealed class LootableInventoryService : ILootableInventoryService
                 itemInternalId: "currency",
                 quantity: 0,
                 currencyAmount: request.Amount);
+
+            await RegisterCharacterLootCrimeAsync(
+                request.LooterSessionId,
+                request.LooterIdentityId,
+                request.LooterCharacterId,
+                request.TargetIdentityId,
+                request.TargetCharacterId,
+                targetEligibility.targetState,
+                targetKind: CrimeTargetKind.Character,
+                targetId: request.TargetCharacterId,
+                actionCode: "loot_character_currency",
+                reason: null,
+                ct);
 
             return new LootTransferResult(
                 true,
@@ -433,6 +463,18 @@ public sealed class LootableInventoryService : ILootableInventoryService
                 request.Quantity,
                 currencyAmount: null);
 
+            if (!request.HasValidKey)
+            {
+                await RegisterContainerAccessCrimeAsync(
+                    request.LooterSessionId,
+                    request.LooterIdentityId,
+                    request.LooterCharacterId,
+                    request.ChestId,
+                    actionCode: "loot_chest_item",
+                    reason: request.LockpickSucceeded ? "lockpick" : "unauthorized_access",
+                    ct);
+            }
+
             return new LootTransferResult(
                 true,
                 null,
@@ -544,6 +586,18 @@ public sealed class LootableInventoryService : ILootableInventoryService
                 quantity: 0,
                 currencyAmount: request.Amount);
 
+            if (!request.HasValidKey)
+            {
+                await RegisterContainerAccessCrimeAsync(
+                    request.LooterSessionId,
+                    request.LooterIdentityId,
+                    request.LooterCharacterId,
+                    request.ChestId,
+                    actionCode: "loot_chest_currency",
+                    reason: request.LockpickSucceeded ? "lockpick" : "unauthorized_access",
+                    ct);
+            }
+
             return new LootTransferResult(
                 true,
                 null,
@@ -571,7 +625,7 @@ public sealed class LootableInventoryService : ILootableInventoryService
         }
     }
 
-    private async Task<(bool allowed, string? denialReason)> EvaluateCharacterLootEligibilityAsync(
+    private async Task<(bool allowed, string? denialReason, CharacterDefeatState? targetState)> EvaluateCharacterLootEligibilityAsync(
         Guid targetSessionId,
         string targetCharacterId,
         bool stealSucceeded,
@@ -580,21 +634,114 @@ public sealed class LootableInventoryService : ILootableInventoryService
     {
         var targetRespawn = await _respawn.GetLoadedForSessionAsync(targetSessionId, ct);
         if (targetRespawn is null || !string.Equals(targetRespawn.CharacterId, targetCharacterId, StringComparison.Ordinal))
-            return (false, "Target lifecycle is not available.");
+            return (false, "Target lifecycle is not available.", null);
 
         if (expectedTargetState.HasValue && expectedTargetState.Value != targetRespawn.State)
-            return (false, "Target state changed.");
+            return (false, "Target state changed.", targetRespawn.State);
 
         var ruleState = await _inventoryRules.GetCharacterStateAsync(targetCharacterId, ct);
         var directLootAllowed = targetRespawn.State == CharacterDefeatState.Unconscious && (ruleState?.IsLootable ?? false);
         if (directLootAllowed)
-            return (true, null);
+            return (true, null, targetRespawn.State);
 
         var stealLootAllowed = targetRespawn.State == CharacterDefeatState.Alive && stealSucceeded;
         if (stealLootAllowed)
-            return (true, null);
+            return (true, null, targetRespawn.State);
 
-        return (false, "Target is not currently lootable.");
+        return (false, "Target is not currently lootable.", targetRespawn.State);
+    }
+
+    private async Task RegisterCharacterLootCrimeAsync(
+        Guid sessionId,
+        string looterIdentityId,
+        string looterCharacterId,
+        string targetIdentityId,
+        string targetCharacterId,
+        CharacterDefeatState? targetState,
+        CrimeTargetKind targetKind,
+        string targetId,
+        string actionCode,
+        string? reason,
+        CancellationToken ct)
+    {
+        var crimeType = targetState switch
+        {
+            CharacterDefeatState.Alive => CrimeType.TheftFromConsciousCharacter,
+            CharacterDefeatState.Unconscious => CrimeType.LootFromUnconsciousCharacter,
+            _ => (CrimeType?)null,
+        };
+
+        if (!crimeType.HasValue)
+            return;
+
+        var metadata = new Dictionary<string, object?>
+        {
+            ["action_code"] = actionCode,
+            ["target_state"] = targetState?.ToString(),
+        };
+
+        var registered = await _crimeLaw.RegisterAutomaticCrimeAsync(
+            new AutomaticCrimeRegistrationRequest(
+                SessionId: sessionId,
+                IdentityId: looterIdentityId,
+                CharacterId: looterCharacterId,
+                CrimeType: crimeType.Value,
+                TargetKind: targetKind,
+                TargetId: targetId,
+                TargetIdentityId: targetIdentityId,
+                TargetCharacterId: targetCharacterId,
+                ActionCode: actionCode,
+                Reason: reason,
+                Metadata: metadata),
+            ct);
+
+        if (!registered.Applied)
+        {
+            _logger.Warning(
+                "[loot] automatic crime registration did not apply identity_id={IdentityId} character_id={CharacterId} reason={Reason}",
+                looterIdentityId,
+                looterCharacterId,
+                registered.DenialReason);
+        }
+    }
+
+    private async Task RegisterContainerAccessCrimeAsync(
+        Guid sessionId,
+        string looterIdentityId,
+        string looterCharacterId,
+        string chestId,
+        string actionCode,
+        string? reason,
+        CancellationToken ct)
+    {
+        var metadata = new Dictionary<string, object?>
+        {
+            ["action_code"] = actionCode,
+            ["container_id"] = chestId,
+        };
+
+        var registered = await _crimeLaw.RegisterAutomaticCrimeAsync(
+            new AutomaticCrimeRegistrationRequest(
+                SessionId: sessionId,
+                IdentityId: looterIdentityId,
+                CharacterId: looterCharacterId,
+                CrimeType: CrimeType.UnauthorizedContainerAccess,
+                TargetKind: CrimeTargetKind.Container,
+                TargetId: chestId,
+                ActionCode: actionCode,
+                Reason: reason,
+                Metadata: metadata),
+            ct);
+
+        if (!registered.Applied)
+        {
+            _logger.Warning(
+                "[loot] container crime registration did not apply identity_id={IdentityId} character_id={CharacterId} chest_id={ChestId} reason={Reason}",
+                looterIdentityId,
+                looterCharacterId,
+                chestId,
+                registered.DenialReason);
+        }
     }
 
     private bool ValidateDistance(double distanceMeters)

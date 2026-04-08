@@ -5,6 +5,7 @@ using KcdMp.Server.Admin;
 using KcdMp.Server.Audit;
 using KcdMp.Server.Bans;
 using KcdMp.Server.Characters;
+using KcdMp.Server.Crime;
 using KcdMp.Server.Identity;
 using KcdMp.Server.Observability;
 using KcdMp.Server.Persistence;
@@ -171,6 +172,43 @@ public sealed class ServerAdminServiceTests
         }
     }
 
+    [Fact]
+    public async Task MarkCrimeAndClearCrimeStateAsync_WorkForAdmin()
+    {
+        var root = CreateTempDir();
+        try
+        {
+            var (admin, _, _, service, _) = await CreateAdminServiceAsync(root);
+
+            var mark = await service.MarkCrimeAsync(
+                admin.InternalId,
+                new AdminCrimeMarkRequest(
+                    IdentityId: "pid_marked",
+                    CharacterId: "cid_marked",
+                    CrimeType: CrimeType.ManualStaffMark,
+                    TargetKind: CrimeTargetKind.None,
+                    Reason: "manual_case"));
+
+            Assert.True(mark.Success);
+            Assert.NotNull(mark.Value);
+            Assert.Equal(CharacterCrimeStatus.Wanted, mark.Value!.Status);
+
+            var clear = await service.ClearCrimeStateAsync(
+                admin.InternalId,
+                identityId: "pid_marked",
+                characterId: "cid_marked",
+                reason: "resolved");
+
+            Assert.True(clear.Success);
+            Assert.NotNull(clear.Value);
+            Assert.Equal(CharacterCrimeStatus.Clean, clear.Value!.Status);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static readonly List<ServerSessionRecord> _sharedSessions = [];
 
     private static async Task<(PlayerIdentityRecord admin, IPlayerIdentityService identities, ICharacterProfileService characters, IServerAdminService adminService, InMemoryObservabilitySink sink)> CreateAdminServiceAsync(string root)
@@ -180,6 +218,7 @@ public sealed class ServerAdminServiceTests
         var identities = new PlayerIdentityService(store, sink);
         var characters = new CharacterProfileService(store, identities, sink);
         var bans = new IdentityBanService(store, sink);
+        var crime = new CrimeLawService(store, sink);
 
         var admin = (await identities.ResolveOrCreateAsync(new PlayerIdentityClaim("Admin", "admin_token", null))).Identity!;
         await identities.TrySetRoleAsync(admin.InternalId, PlayerIdentityRole.Admin);
@@ -189,6 +228,7 @@ public sealed class ServerAdminServiceTests
             identities,
             characters,
             bans,
+            crime,
             sink,
             listSessions: () =>
             {

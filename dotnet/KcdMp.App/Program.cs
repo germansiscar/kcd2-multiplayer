@@ -3,6 +3,7 @@ using KcdMp.Server.AccessControl;
 using KcdMp.Server.Audit;
 using KcdMp.Server.Characters;
 using KcdMp.Server.Communication;
+using KcdMp.Server.Crime;
 using KcdMp.Server.Currency;
 using KcdMp.Server.Identity;
 using KcdMp.Server;
@@ -75,6 +76,16 @@ var respawnOptions = new CharacterRespawnOptions
     SaveRetryCount = config.RespawnSaveRetryCount,
     SaveRetryDelay = TimeSpan.FromMilliseconds(Math.Max(0, config.RespawnSaveRetryDelayMs)),
 };
+var crimeOptions = new CrimeLawOptions
+{
+    WantedDurationSeconds = Math.Max(1, config.CrimeWantedDurationSeconds),
+    DedupWindowSeconds = Math.Max(0, config.CrimeDedupWindowSeconds),
+    MaxEventsPerCharacter = Math.Max(1, config.CrimeMaxEventsPerCharacter),
+    AutoDetectConsciousCharacterTheft = config.CrimeAutoDetectConsciousCharacterTheft,
+    AutoDetectUnconsciousCharacterLoot = config.CrimeAutoDetectUnconsciousCharacterLoot,
+    AutoDetectUnauthorizedContainerAccess = config.CrimeAutoDetectUnauthorizedContainerAccess,
+    ConfiguredIllegalActions = config.CrimeConfiguredIllegalActions ?? [],
+};
 var communicationOptions = new ServerCommunicationOptions
 {
     MaxMessageLength = Math.Max(32, config.ChatMaxMessageLength),
@@ -96,6 +107,11 @@ if (config.Mode == "host")
     Log.Information("Audit enabled: {Enabled} (retention days: {RetentionDays})", auditOptions.Enabled, auditOptions.RetentionDays);
     Log.Information("Currency initial balance: {Balance}", currencyOptions.InitialBalance);
     Log.Information("Respawn unconscious duration (s): {Duration}", respawnOptions.UnconsciousDuration.TotalSeconds);
+    Log.Information(
+        "Crime law: wantedDuration={WantedDuration}s, dedupWindow={DedupWindow}s, maxEvents={MaxEvents}",
+        config.CrimeWantedDurationSeconds,
+        config.CrimeDedupWindowSeconds,
+        config.CrimeMaxEventsPerCharacter);
     Log.Information(
         "Communication: maxLen={MaxLen}, rate={Rate}/{WindowMs}ms, radius(normal={Normal}, whisper={Whisper}, shout={Shout}), zoneCell={ZoneCell}, auditText={AuditText}",
         communicationOptions.MaxMessageLength,
@@ -124,6 +140,7 @@ if (config.Mode == "host")
         communicationOptions: communicationOptions,
         characterCurrencyOptions: currencyOptions,
         characterRespawnOptions: respawnOptions,
+        crimeLawOptions: crimeOptions,
         worldInitEnabled: config.WorldInitEnabled,
         worldInitMaxRetries: config.WorldInitMaxRetries,
         worldInitBlockOnCriticalFailure: config.WorldInitBlockOnCriticalFailure,

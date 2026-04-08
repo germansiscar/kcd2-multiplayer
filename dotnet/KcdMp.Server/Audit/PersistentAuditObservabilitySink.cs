@@ -295,6 +295,12 @@ public sealed class PersistentAuditObservabilitySink : IServerObservabilitySink
             ServerObservableEventType.ChatRateLimitTriggered or
             ServerObservableEventType.ChatInvalidChannel => ServerAuditCategory.Communication,
 
+            ServerObservableEventType.CrimeDetected or
+            ServerObservableEventType.CrimeRegistered or
+            ServerObservableEventType.CrimeStateUpdated or
+            ServerObservableEventType.CrimeAdminAction or
+            ServerObservableEventType.CrimeRegistrationFailed => ServerAuditCategory.Crime,
+
             ServerObservableEventType.BackendError => ServerAuditCategory.Error,
             _ => default,
         };
@@ -349,6 +355,11 @@ public sealed class PersistentAuditObservabilitySink : IServerObservabilitySink
             ServerObservableEventType.ChatMessageRejected or
             ServerObservableEventType.ChatRateLimitTriggered or
             ServerObservableEventType.ChatInvalidChannel or
+            ServerObservableEventType.CrimeDetected or
+            ServerObservableEventType.CrimeRegistered or
+            ServerObservableEventType.CrimeStateUpdated or
+            ServerObservableEventType.CrimeAdminAction or
+            ServerObservableEventType.CrimeRegistrationFailed or
             ServerObservableEventType.BackendError;
     }
 
@@ -378,6 +389,7 @@ public sealed class PersistentAuditObservabilitySink : IServerObservabilitySink
             ServerObservableEventType.ChatMessageRejected or
             ServerObservableEventType.ChatRateLimitTriggered or
             ServerObservableEventType.ChatInvalidChannel or
+            ServerObservableEventType.CrimeRegistrationFailed or
             ServerObservableEventType.BackendError;
     }
 

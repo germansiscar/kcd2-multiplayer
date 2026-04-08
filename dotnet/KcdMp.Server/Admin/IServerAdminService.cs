@@ -1,5 +1,6 @@
 using KcdMp.Server.Bans;
 using KcdMp.Server.Characters;
+using KcdMp.Server.Crime;
 using KcdMp.Server.Identity;
 
 namespace KcdMp.Server.Admin;
@@ -95,6 +96,23 @@ public interface IServerAdminService
     Task<AdminActionResult<AdminAuditQueryResult>> QueryAuditAsync(
         string adminIdentityId,
         AdminAuditQuery query,
+        CancellationToken ct = default);
+
+    Task<AdminActionResult<CharacterCrimeRecord>> GetCrimeStateAsync(
+        string adminIdentityId,
+        string characterId,
+        CancellationToken ct = default);
+
+    Task<AdminActionResult<CharacterCrimeRecord>> MarkCrimeAsync(
+        string adminIdentityId,
+        AdminCrimeMarkRequest request,
+        CancellationToken ct = default);
+
+    Task<AdminActionResult<CharacterCrimeRecord>> ClearCrimeStateAsync(
+        string adminIdentityId,
+        string identityId,
+        string characterId,
+        string reason,
         CancellationToken ct = default);
 }
 

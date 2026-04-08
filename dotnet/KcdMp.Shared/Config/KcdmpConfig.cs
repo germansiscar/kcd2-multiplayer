@@ -45,6 +45,13 @@ public class KcdmpConfig
     public string RespawnDefaultPointId { get; set; } = "default_spawn";
     public int RespawnSaveRetryCount { get; set; } = 1;
     public int RespawnSaveRetryDelayMs { get; set; } = 100;
+    public int CrimeWantedDurationSeconds { get; set; } = 3600;
+    public int CrimeDedupWindowSeconds { get; set; } = 3;
+    public int CrimeMaxEventsPerCharacter { get; set; } = 256;
+    public bool CrimeAutoDetectConsciousCharacterTheft { get; set; } = true;
+    public bool CrimeAutoDetectUnconsciousCharacterLoot { get; set; } = true;
+    public bool CrimeAutoDetectUnauthorizedContainerAccess { get; set; } = true;
+    public List<string> CrimeConfiguredIllegalActions { get; set; } = [];
     public string ObservabilityMinSeverity { get; set; } = "Information";
     public bool ObservabilityIncludeSyncMicroEvents { get; set; } = false;
     public bool AuditEnabled { get; set; } = true;

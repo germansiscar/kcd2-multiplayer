@@ -124,6 +124,11 @@ public enum ServerObservableEventType
     LootAccessConflict = 101,
     LootExecutionFailed = 102,
     LootDesyncIncident = 103,
+    CrimeDetected = 104,
+    CrimeRegistered = 105,
+    CrimeStateUpdated = 106,
+    CrimeAdminAction = 107,
+    CrimeRegistrationFailed = 108,
 }
 
 public sealed record ServerObservableEvent(

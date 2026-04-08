@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using KcdMp.Server.Currency;
+using KcdMp.Server.Crime;
 using KcdMp.Server.Inventory;
 using KcdMp.Server.InventoryRules;
 using KcdMp.Server.Loot;
@@ -25,7 +26,8 @@ public sealed class LootableInventoryServiceTests
             var currency = new CharacterCurrencyService(store, sink);
             var rules = new InventoryRulesConfigurationService(store, sink);
             var respawn = new CharacterRespawnService(store, sink, inventoryRulesService: rules);
-            var loot = new LootableInventoryService(store, inventory, currency, respawn, rules, sink);
+            var crime = new CrimeLawService(store, sink);
+            var loot = new LootableInventoryService(store, inventory, currency, respawn, rules, crime, sink);
 
             var looterSession = Guid.NewGuid();
             var targetSession = Guid.NewGuid();
@@ -79,6 +81,7 @@ public sealed class LootableInventoryServiceTests
             Assert.Equal(3, looterApples[0].Quantity);
 
             Assert.Contains(sink.Events, evt => evt.Type == ServerObservableEventType.LootItemTransferred);
+            Assert.Contains(sink.Events, evt => evt.Type == ServerObservableEventType.CrimeRegistered);
         }
         finally
         {
@@ -100,7 +103,8 @@ public sealed class LootableInventoryServiceTests
             var currency = new CharacterCurrencyService(store, sink);
             var rules = new InventoryRulesConfigurationService(store, sink);
             var respawn = new CharacterRespawnService(store, sink, inventoryRulesService: rules);
-            var loot = new LootableInventoryService(store, inventory, currency, respawn, rules, sink);
+            var crime = new CrimeLawService(store, sink);
+            var loot = new LootableInventoryService(store, inventory, currency, respawn, rules, crime, sink);
 
             var looterSession = Guid.NewGuid();
             var targetSession = Guid.NewGuid();
@@ -159,7 +163,8 @@ public sealed class LootableInventoryServiceTests
             var currency = new CharacterCurrencyService(store, sink, new CharacterCurrencyOptions { InitialBalance = 0 });
             var rules = new InventoryRulesConfigurationService(store, sink);
             var respawn = new CharacterRespawnService(store, sink, inventoryRulesService: rules);
-            var loot = new LootableInventoryService(store, inventory, currency, respawn, rules, sink);
+            var crime = new CrimeLawService(store, sink);
+            var loot = new LootableInventoryService(store, inventory, currency, respawn, rules, crime, sink);
 
             var looterSession = Guid.NewGuid();
             var targetSession = Guid.NewGuid();
@@ -192,6 +197,7 @@ public sealed class LootableInventoryServiceTests
             var targetCurrency = await currency.GetLoadedForSessionAsync(targetSession);
             Assert.Equal(55, looterCurrency!.Balance);
             Assert.Equal(75, targetCurrency!.Balance);
+            Assert.Contains(sink.Events, evt => evt.Type == ServerObservableEventType.CrimeRegistered);
         }
         finally
         {
@@ -213,12 +219,14 @@ public sealed class LootableInventoryServiceTests
             var currency = new CharacterCurrencyService(store, sink);
             var rules = new InventoryRulesConfigurationService(store, sink);
             var respawn = new CharacterRespawnService(store, sink, inventoryRulesService: rules);
+            var crime = new CrimeLawService(store, sink);
             var loot = new LootableInventoryService(
                 store,
                 inventory,
                 currency,
                 respawn,
                 rules,
+                crime,
                 sink,
                 new LootableInventoryOptions { SimulatedTransferDelay = TimeSpan.FromMilliseconds(200) });
 

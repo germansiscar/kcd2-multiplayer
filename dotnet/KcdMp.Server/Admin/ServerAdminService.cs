@@ -2,6 +2,7 @@ using System.Text.Json;
 using KcdMp.Server.Audit;
 using KcdMp.Server.Bans;
 using KcdMp.Server.Characters;
+using KcdMp.Server.Crime;
 using KcdMp.Server.Identity;
 using KcdMp.Server.Observability;
 using KcdMp.Server.Persistence;
@@ -15,6 +16,7 @@ public sealed class ServerAdminService : IServerAdminService
     private readonly IPlayerIdentityService _identityService;
     private readonly ICharacterProfileService _characterService;
     private readonly IIdentityBanService _banService;
+    private readonly ICrimeLawService _crimeLaw;
     private readonly IServerObservabilitySink _observability;
     private readonly JsonServerStorageLayout _layout;
     private readonly ILogger _logger;
@@ -31,6 +33,7 @@ public sealed class ServerAdminService : IServerAdminService
         IPlayerIdentityService identityService,
         ICharacterProfileService characterService,
         IIdentityBanService banService,
+        ICrimeLawService crimeLaw,
         IServerObservabilitySink observability,
         Func<IReadOnlyList<ServerSessionRecord>> listSessions,
         Func<Guid, bool> kickSession,
@@ -42,6 +45,7 @@ public sealed class ServerAdminService : IServerAdminService
         _identityService = identityService ?? throw new ArgumentNullException(nameof(identityService));
         _characterService = characterService ?? throw new ArgumentNullException(nameof(characterService));
         _banService = banService ?? throw new ArgumentNullException(nameof(banService));
+        _crimeLaw = crimeLaw ?? throw new ArgumentNullException(nameof(crimeLaw));
         _observability = observability ?? throw new ArgumentNullException(nameof(observability));
         _listSessions = listSessions ?? throw new ArgumentNullException(nameof(listSessions));
         _kickSession = kickSession ?? throw new ArgumentNullException(nameof(kickSession));
@@ -474,6 +478,88 @@ public sealed class ServerAdminService : IServerAdminService
                 ["total_matched"] = filtered.Length,
             });
         return new(true, null, new AdminAuditQueryResult(filtered, filtered.Length));
+    }
+
+    public async Task<AdminActionResult<CharacterCrimeRecord>> GetCrimeStateAsync(
+        string adminIdentityId,
+        string characterId,
+        CancellationToken ct = default)
+    {
+        var auth = await AuthorizeAsync(adminIdentityId, ct);
+        if (!auth.Success)
+            return new(false, auth.Error, null);
+
+        if (string.IsNullOrWhiteSpace(characterId))
+            return new(false, "Character id is required.", null);
+
+        var state = await _crimeLaw.GetCharacterRecordAsync(characterId, ct);
+        if (state is null)
+            return new(false, "Crime state not found.", null);
+
+        return new(true, null, state);
+    }
+
+    public async Task<AdminActionResult<CharacterCrimeRecord>> MarkCrimeAsync(
+        string adminIdentityId,
+        AdminCrimeMarkRequest request,
+        CancellationToken ct = default)
+    {
+        var auth = await AuthorizeAsync(adminIdentityId, ct);
+        if (!auth.Success)
+            return new(false, auth.Error, null);
+
+        if (string.IsNullOrWhiteSpace(request.IdentityId) || string.IsNullOrWhiteSpace(request.CharacterId))
+            return new(false, "Identity id and character id are required.", null);
+
+        var applied = await _crimeLaw.RegisterManualCrimeAsync(
+            new ManualCrimeRegistrationRequest(
+                SessionId: null,
+                ActorIdentityId: adminIdentityId,
+                IdentityId: request.IdentityId,
+                CharacterId: request.CharacterId,
+                CrimeType: request.CrimeType,
+                TargetKind: request.TargetKind,
+                TargetId: request.TargetId,
+                TargetIdentityId: request.TargetIdentityId,
+                TargetCharacterId: request.TargetCharacterId,
+                ActionCode: request.ActionCode,
+                Reason: request.Reason,
+                Metadata: request.Metadata),
+            ct);
+
+        if (!applied.Applied || applied.Record is null)
+            return new(false, applied.DenialReason ?? "Crime could not be marked.", null);
+
+        return new(true, null, applied.Record);
+    }
+
+    public async Task<AdminActionResult<CharacterCrimeRecord>> ClearCrimeStateAsync(
+        string adminIdentityId,
+        string identityId,
+        string characterId,
+        string reason,
+        CancellationToken ct = default)
+    {
+        var auth = await AuthorizeAsync(adminIdentityId, ct);
+        if (!auth.Success)
+            return new(false, auth.Error, null);
+
+        if (string.IsNullOrWhiteSpace(identityId) || string.IsNullOrWhiteSpace(characterId))
+            return new(false, "Identity id and character id are required.", null);
+
+        var cleared = await _crimeLaw.ClearCharacterStateAsync(
+            new CrimeStateClearRequest(
+                SessionId: null,
+                ActorIdentityId: adminIdentityId,
+                IdentityId: identityId,
+                CharacterId: characterId,
+                Reason: reason),
+            ct);
+
+        if (!cleared.Applied || cleared.Record is null)
+            return new(false, cleared.DenialReason ?? "Crime state could not be cleared.", null);
+
+        return new(true, null, cleared.Record);
     }
 
     private async Task<AdminActionResult> AuthorizeAsync(string adminIdentityId, CancellationToken ct)

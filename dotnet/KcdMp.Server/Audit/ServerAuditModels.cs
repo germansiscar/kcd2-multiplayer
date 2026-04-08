@@ -13,6 +13,7 @@ public enum ServerAuditCategory
     Persistence = 6,
     Error = 7,
     Communication = 8,
+    Crime = 9,
 }
 
 public enum ServerAuditResult

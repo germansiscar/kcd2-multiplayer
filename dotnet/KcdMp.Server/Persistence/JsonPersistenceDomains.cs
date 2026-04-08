@@ -12,6 +12,7 @@ public static class JsonPersistenceDomains
     public const string WorldContainers = "world_containers";
     public const string Currency = "currency";
     public const string Respawn = "respawn";
+    public const string Crime = "crime";
     public const string Bans = "bans";
     public const string Economy = "economy";
     public const string Audit = "audit";
@@ -26,6 +27,7 @@ public static class JsonPersistenceDomains
         WorldContainers,
         Currency,
         Respawn,
+        Crime,
         Bans,
         Economy,
         Audit,

@@ -8,6 +8,7 @@ using KcdMp.Server.Audit;
 using KcdMp.Server.Bans;
 using KcdMp.Server.Characters;
 using KcdMp.Server.Communication;
+using KcdMp.Server.Crime;
 using KcdMp.Server.Currency;
 using KcdMp.Server.Identity;
 using KcdMp.Server.Inventory;
@@ -37,6 +38,7 @@ public class RelayServer
     private readonly ICharacterCurrencyService _characterCurrencyService;
     private readonly ICharacterRespawnService _characterRespawnService;
     private readonly IInventoryRulesConfigurationService _inventoryRulesService;
+    private readonly ICrimeLawService _crimeLawService;
     private readonly IServerAdminService _adminService;
     private readonly Dictionary<Guid, ClientSession> _clientsBySessionId = [];
     private readonly HashSet<string> _bootstrapAdminIdentityIds;
@@ -73,6 +75,7 @@ public class RelayServer
         CharacterCurrencyOptions? characterCurrencyOptions = null,
         CharacterRespawnOptions? characterRespawnOptions = null,
         InventoryRulesOptions? inventoryRulesOptions = null,
+        CrimeLawOptions? crimeLawOptions = null,
         ILogger? logger = null,
         IServerObservabilitySink? observability = null,
         ServerObservabilityOptions? observabilityOptions = null,
@@ -88,6 +91,7 @@ public class RelayServer
         ICharacterCurrencyService? characterCurrencyService = null,
         ICharacterRespawnService? characterRespawnService = null,
         IInventoryRulesConfigurationService? inventoryRulesService = null,
+        ICrimeLawService? crimeLawService = null,
         ServerCommunicationOptions? communicationOptions = null,
         bool worldInitEnabled = true,
         int worldInitMaxRetries = 1,
@@ -178,11 +182,18 @@ public class RelayServer
                                        characterRespawnOptions,
                                        _inventoryRulesService,
                                        logger: _logger);
+        _crimeLawService = crimeLawService
+                           ?? new CrimeLawService(
+                               store,
+                               _observability,
+                               crimeLawOptions,
+                               _logger);
         _adminService = adminService
                         ?? new ServerAdminService(
                             _identityService,
                             _characterProfileService,
                             _identityBanService,
+                            _crimeLawService,
                             _observability,
                             listSessions: () => _sessionBackend.GetActiveSessions(),
                             kickSession: TryKickSessionById,
@@ -200,6 +211,7 @@ public class RelayServer
     {
         await _accessControlService.GetActiveConfigurationAsync(ct);
         await _inventoryRulesService.GetActiveConfigurationAsync(ct);
+        await _crimeLawService.GetActiveConfigurationAsync(ct);
         var listener = new TcpListener(IPAddress.Any, _port);
         listener.Start();
         Emit(

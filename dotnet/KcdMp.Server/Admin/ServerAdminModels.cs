@@ -1,5 +1,6 @@
 using KcdMp.Server.Bans;
 using KcdMp.Server.Characters;
+using KcdMp.Server.Crime;
 using KcdMp.Server.Identity;
 using KcdMp.Server.Sessions;
 using KcdMp.Server.Audit;
@@ -53,3 +54,15 @@ public sealed record AdminBanApplyRequest(
 public sealed record AdminAuditQueryResult(
     IReadOnlyList<ServerAuditEventRecord> Events,
     int TotalMatched);
+
+public sealed record AdminCrimeMarkRequest(
+    string IdentityId,
+    string CharacterId,
+    CrimeType CrimeType,
+    CrimeTargetKind TargetKind = CrimeTargetKind.None,
+    string? TargetId = null,
+    string? TargetIdentityId = null,
+    string? TargetCharacterId = null,
+    string? ActionCode = null,
+    string? Reason = null,
+    IReadOnlyDictionary<string, object?>? Metadata = null);

@@ -443,6 +443,47 @@ Fecha de actualización: 2026-04-07
   - tests nuevos en:
     - `dotnet/KcdMp.Tests/Server/LootableInventoryServiceTests.cs`
 
+### F19 / FT-019 - Crime/Law system base hibrido (IMPLEMENTADA)
+
+- Estado: implementada en codigo + cubierta con tests de servidor.
+- Reutiliza del repo actual:
+  - `dotnet/KcdMp.Server/Loot/` (FT-018) para deteccion automatica de crimen en acciones de loot.
+  - `dotnet/KcdMp.Server/Audit/` (FT-015) para trazabilidad persistente de crimen/estado.
+  - `dotnet/KcdMp.Server/Admin/` (FT-016) para marcado y limpieza manual por staff.
+- Nueva implementacion:
+  - modulo `dotnet/KcdMp.Server/Crime/` con:
+    - `CrimeLawService` + contrato `ICrimeLawService`
+    - persistencia por personaje en dominio `crime`
+    - configuracion persistente en `config/crime_law_v1`
+    - estado criminal simple `Clean/Wanted` con vigencia temporal configurable
+    - deduplicacion base de eventos para mitigar spam/inconsistencias
+  - deteccion automatica integrada en loot:
+    - robo a personaje consciente
+    - loot a personaje inconsciente
+    - acceso a contenedor sin llave valida
+  - operacion manual admin:
+    - marcar crimen manual
+    - consultar estado criminal
+    - limpiar estado criminal
+  - observabilidad y auditoria extendidas con eventos:
+    - `CrimeDetected`
+    - `CrimeRegistered`
+    - `CrimeStateUpdated`
+    - `CrimeAdminAction`
+    - `CrimeRegistrationFailed`
+  - categoria de auditoria dedicada: `Crime`
+- Refactor requerido:
+  - extensiones aditivas en `ServerAdminService`, `RelayServer`, `LootableInventoryService` y config compartida.
+- Riesgo tecnico introducido:
+  - la deteccion automatica inicial se limita a señales de loot/lockpick (sin testigos ni sistema judicial completo en esta fase).
+  - el estado criminal es in-process + persistencia JSON local (sin coordinacion multi-nodo en esta etapa).
+- Evidencia:
+  - tests nuevos/actualizados en:
+    - `dotnet/KcdMp.Tests/Server/CrimeLawServiceTests.cs`
+    - `dotnet/KcdMp.Tests/Server/LootableInventoryServiceTests.cs`
+    - `dotnet/KcdMp.Tests/Server/ServerAdminServiceTests.cs`
+    - `dotnet/KcdMp.Tests/Server/PersistentAuditObservabilitySinkTests.cs`
+
 ### F20 / FT-020 - Aplicacion de estado dirigida por servidor (IMPLEMENTADA)
 
 - Estado: implementada en codigo + cubierta con tests.
