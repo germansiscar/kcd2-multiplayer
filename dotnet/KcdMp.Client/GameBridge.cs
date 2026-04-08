@@ -45,6 +45,7 @@ public partial class GameBridge(
     private const float PosThreshold  = 0.05f;
     private const float RotThreshold  = 0.02f;
     private const string ProjectionResultCvarName = "sv_servername";
+    private const string ChatSubmitCvarName = "kcd2mp_chat_submit";
 
     private readonly ILogger _logger = logger ?? Log.Logger;
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromMilliseconds(GameApiTimeoutMs) };
@@ -227,6 +228,7 @@ public partial class GameBridge(
         var stateTask    = StateLoopAsync(stream, cts.Token);
         var pingTask     = PingLoopAsync(stream, cts.Token);
         var damageTask   = DamageEventLoopAsync(stream, cts.Token);
+        var chatTask     = ChatInputLoopAsync(stream, cts.Token);
 
         // --- Position push loop ---
         try
@@ -273,6 +275,7 @@ public partial class GameBridge(
             try { await stateTask; } catch { }
             try { await pingTask;     } catch { }
             try { await damageTask;   } catch { }
+            try { await chatTask;   } catch { }
             _logger.Information("Removing all ghosts...");
             try { await ExecLuaAsync("KCD2MP_RemoveAllGhosts()"); } catch { }
             if (!_sessionInvalidated && !appCt.IsCancellationRequested)
@@ -457,6 +460,57 @@ public partial class GameBridge(
             catch (Exception ex) { _logger.Warning(ex, "[event] Poll error"); }
 
             await Task.Delay(DamageCheckMs, ct);
+        }
+    }
+
+    private async Task ChatInputLoopAsync(NetworkStream stream, CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested && !_sessionInvalidated)
+        {
+            try
+            {
+                await ExecLuaAsync(
+                    $@"System.SetCVar(""{ChatSubmitCvarName}"",(function()
+local fn = KCD2MP_PopPendingChatInput
+if type(fn) ~= 'function' then return '' end
+local value = fn()
+if not value then return '' end
+value = tostring(value)
+if value == '' then return '' end
+return value
+end)())");
+
+                var rawInput = await ReadCvarValueAsync(ChatSubmitCvarName);
+                if (!string.IsNullOrWhiteSpace(rawInput))
+                {
+                    var text = rawInput.Trim();
+                    var payload = JsonSerializer.SerializeToUtf8Bytes(new { text });
+                    await stream.WriteAsync(PacketWriter.Event((ushort)EventType.ChatSubmit, payload), ct);
+
+                    if (text.StartsWith("/", StringComparison.Ordinal))
+                    {
+                        var firstSpace = text.IndexOf(' ');
+                        var command = firstSpace > 0 ? text[..firstSpace] : text;
+                        if (string.IsNullOrWhiteSpace(command))
+                            command = "/unknown";
+                        _logger.Information("[chat-ui] command sent {Command}", command);
+                    }
+                    else
+                    {
+                        _logger.Information("[chat-ui] message sent length={Length}", text.Length);
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                _logger.Warning(ex, "[chat-ui] input polling failed");
+            }
+
+            await Task.Delay(80, ct);
         }
     }
 
@@ -1037,6 +1091,29 @@ end)())");
         }
     }
 
+    private async Task RenderChatMessageAsync(string chatJson, string? fallbackLine)
+    {
+        var safeJson = EscapeLua(chatJson);
+        var safeFallback = EscapeLua(string.IsNullOrWhiteSpace(fallbackLine)
+            ? "Nuevo mensaje de chat."
+            : fallbackLine!.Trim());
+
+        try
+        {
+            await ExecLuaAsync(
+                $@"if KCD2MP_AppendChatMessage then
+KCD2MP_AppendChatMessage(""{safeJson}"")
+else
+Game.SendInfoText(""{safeFallback}"")
+end");
+        }
+        catch
+        {
+            if (!string.IsNullOrWhiteSpace(fallbackLine))
+                await NotifyUserAsync(fallbackLine!);
+        }
+    }
+
     private async Task HandleStateSyncAsync(byte sourceId, byte stateType, byte[] payload)
     {
         try
@@ -1130,8 +1207,7 @@ end)())");
                 case EventType.ChatMessage:
                 {
                     var line = TryReadChatLine(json);
-                    if (!string.IsNullOrWhiteSpace(line))
-                        await NotifyUserAsync(line!);
+                    await RenderChatMessageAsync(json, line);
                     break;
                 }
             }

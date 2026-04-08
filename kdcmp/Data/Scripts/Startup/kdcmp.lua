@@ -18,6 +18,222 @@ KCD2MP.isRiding = false         -- updated each interp tick (player on horse det
 KCD2MP.logActions = false       -- set true only to discover action names (floods log)
 KCD2MP.pendingDamageEvents = {}
 KCD2MP.ghostEntityIds = {}  -- maps entity ID -> ghost player ID
+local mp_log
+
+-- ===== FT-032: Ingame Chat GUI State =====
+KCD2MP.chat = {
+    keybindHint = "Y",
+    inputOpen = false,
+    draftText = "",
+    pendingSubmissions = {},
+    history = {},
+    maxHistory = 60,
+    maxVisible = 10,
+    maxDraftLength = 280,
+    overlayVisibleUntil = 0,
+}
+
+local function _kcd2mp_trim(value)
+    local text = tostring(value or "")
+    text = string.gsub(text, "^%s+", "")
+    text = string.gsub(text, "%s+$", "")
+    return text
+end
+
+local function _kcd2mp_chat_touch_overlay(seconds)
+    local ttl = seconds or 10
+    KCD2MP.chat.overlayVisibleUntil = os.clock() + ttl
+end
+
+local function _kcd2mp_chat_read_json_string(jsonStr, key)
+    if not jsonStr or not key then return nil end
+    local pattern = '"' .. key .. '"%s*:%s*"([^"]*)"'
+    local raw = jsonStr:match(pattern)
+    if not raw or raw == "" then return nil end
+    return raw
+end
+
+local function _kcd2mp_chat_channel_tag(channel, line)
+    local ch = string.lower(tostring(channel or "local"))
+    if ch == "system" then return "SYSTEM", "system" end
+    if ch == "global_ooc" then return "OOC", "global" end
+    if ch == "rp_me" then return "ME", "rp" end
+    if ch == "rp_do" then return "DO", "rp" end
+    if ch == "rp_try" then return "TRY", "rp" end
+    if ch == "direct_whisper" or ch == "local_whisper" then return "W", "whisper" end
+    if ch == "local_shout" then return "SHOUT", "shout" end
+    if ch == "local" then return "LOCAL", "local" end
+    local lowerLine = string.lower(tostring(line or ""))
+    if string.find(lowerLine, "^%[system%]") then return "SYSTEM", "system" end
+    if string.find(lowerLine, "^%[ooc%]") then return "OOC", "global" end
+    if string.find(lowerLine, "^%[do%]") then return "DO", "rp" end
+    if string.find(lowerLine, "^%[try%]") then return "TRY", "rp" end
+    if string.find(lowerLine, "^%[susurro%]") then return "W", "whisper" end
+    if string.find(lowerLine, "^%[grito%]") then return "SHOUT", "shout" end
+    if string.find(lowerLine, "^%*") then return "ME", "rp" end
+    return "CHAT", "local"
+end
+
+local function _kcd2mp_chat_push_entry(channel, senderName, lineText)
+    local line = _kcd2mp_trim(lineText)
+    if line == "" then return end
+    local tag, visualType = _kcd2mp_chat_channel_tag(channel, line)
+    table.insert(KCD2MP.chat.history, {
+        channel = tostring(channel or "local"),
+        sender = tostring(senderName or ""),
+        line = line,
+        tag = tag,
+        visualType = visualType,
+        at = os.clock(),
+    })
+    while #KCD2MP.chat.history > KCD2MP.chat.maxHistory do
+        table.remove(KCD2MP.chat.history, 1)
+    end
+    _kcd2mp_chat_touch_overlay(12)
+end
+
+function KCD2MP_SetChatInputOpen(isOpen)
+    local open = (isOpen == true or isOpen == 1 or isOpen == "1" or isOpen == "true")
+    if KCD2MP.chat.inputOpen == open then
+        _kcd2mp_chat_touch_overlay(12)
+        return
+    end
+    KCD2MP.chat.inputOpen = open
+    _kcd2mp_chat_touch_overlay(12)
+    if open then
+        mp_log("CHAT_GUI_OPEN")
+    else
+        mp_log("CHAT_GUI_CLOSE")
+    end
+end
+
+function KCD2MP_ToggleChatInput()
+    KCD2MP_SetChatInputOpen(not KCD2MP.chat.inputOpen)
+end
+
+function KCD2MP_SetChatDraft(text)
+    local draft = tostring(text or "")
+    if string.len(draft) > KCD2MP.chat.maxDraftLength then
+        draft = string.sub(draft, 1, KCD2MP.chat.maxDraftLength)
+    end
+    KCD2MP.chat.draftText = draft
+    _kcd2mp_chat_touch_overlay(12)
+end
+
+function KCD2MP_SubmitChatInput(text)
+    local line = _kcd2mp_trim(text)
+    if line == "" then
+        _kcd2mp_chat_push_entry("system", "", "Entrada de chat vacia.")
+        mp_log("CHAT_INPUT_ERROR empty")
+        return false
+    end
+    if string.len(line) > KCD2MP.chat.maxDraftLength then
+        line = string.sub(line, 1, KCD2MP.chat.maxDraftLength)
+    end
+    table.insert(KCD2MP.chat.pendingSubmissions, line)
+    KCD2MP.chat.draftText = ""
+    KCD2MP_SetChatInputOpen(false)
+
+    local cmd = line:match("^(/%S+)")
+    if cmd then
+        mp_log("CHAT_COMMAND_SENT " .. tostring(cmd))
+    else
+        mp_log("CHAT_MESSAGE_SENT len=" .. tostring(string.len(line)))
+    end
+    return true
+end
+
+function KCD2MP_SubmitChatFromConsole(line)
+    return KCD2MP_SubmitChatInput(line)
+end
+
+function KCD2MP_PopPendingChatInput()
+    if not KCD2MP.chat.pendingSubmissions or #KCD2MP.chat.pendingSubmissions == 0 then
+        return ""
+    end
+    local line = table.remove(KCD2MP.chat.pendingSubmissions, 1)
+    return tostring(line or "")
+end
+
+function KCD2MP_AppendChatMessage(jsonStr)
+    local channel = _kcd2mp_chat_read_json_string(jsonStr, "channel") or "local"
+    local sender = _kcd2mp_chat_read_json_string(jsonStr, "senderCharacterName")
+    local formatted = _kcd2mp_chat_read_json_string(jsonStr, "formatted")
+    local text = _kcd2mp_chat_read_json_string(jsonStr, "text")
+
+    local line = nil
+    if formatted and formatted ~= "" then
+        line = formatted
+    elseif text and text ~= "" then
+        if sender and sender ~= "" then
+            line = sender .. ": " .. text
+        else
+            line = text
+        end
+    end
+
+    if line and line ~= "" then
+        _kcd2mp_chat_push_entry(channel, sender, line)
+    end
+    return true
+end
+
+local function _kcd2mp_chat_style_size(entry)
+    local t = tostring(entry.visualType or "local")
+    if t == "system" then return 1.3 end
+    if t == "rp" then return 1.2 end
+    if t == "whisper" then return 1.1 end
+    if t == "shout" then return 1.3 end
+    if t == "global" then return 1.2 end
+    return 1.15
+end
+
+local function _kcd2mp_chat_draw_overlay()
+    local chat = KCD2MP.chat
+    if not chat then return end
+
+    local now = os.clock()
+    local visible = chat.inputOpen or now < (chat.overlayVisibleUntil or 0)
+    if not visible then return end
+
+    local baseX = 16
+    local baseY = 38
+    pcall(function()
+        System.DrawText(baseX, baseY, "[KCD2MP CHAT]", 1.6)
+    end)
+
+    local history = chat.history or {}
+    local first = #history - chat.maxVisible + 1
+    if first < 1 then first = 1 end
+
+    local y = baseY + 16
+    for i = first, #history do
+        local entry = history[i]
+        local tag = tostring(entry.tag or "CHAT")
+        local line = tostring(entry.line or "")
+        local size = _kcd2mp_chat_style_size(entry)
+        local rendered = string.format("[%s] %s", tag, line)
+        pcall(function()
+            System.DrawText(baseX, y, rendered, size)
+        end)
+        y = y + 13
+    end
+
+    if chat.inputOpen then
+        local draft = tostring(chat.draftText or "")
+        pcall(function()
+            System.DrawText(baseX, y + 4, "> " .. draft .. "_", 1.3)
+        end)
+        pcall(function()
+            System.DrawText(baseX, y + 18, "Enter: enviar | Esc: cerrar | Soporta /me /do /try /ooc /w", 1.0)
+        end)
+    else
+        local hint = "Pulsa " .. tostring(chat.keybindHint or "Y") .. " para abrir chat. Rapido: mp_chat <texto>"
+        pcall(function()
+            System.DrawText(baseX, y + 4, hint, 1.0)
+        end)
+    end
+end
 
 -- ===== Debug Logger =====
 -- Messages are queued in KCD2MP.debugLog (max 50).
@@ -25,7 +241,7 @@ KCD2MP.ghostEntityIds = {}  -- maps entity ID -> ghost player ID
 KCD2MP.debugLog = {}
 local MP_LOG_MAX = 50
 
-local function mp_log(msg)
+mp_log = function(msg)
     local entry = string.format("[%.2f] %s", os.clock(), msg)
     table.insert(KCD2MP.debugLog, entry)
     if #KCD2MP.debugLog > MP_LOG_MAX then
@@ -513,6 +729,7 @@ function KCD2MP_LabelTick()
             System.DrawText(10, 10, KCD2MP.pingText, 2)
         end)
     end
+    _kcd2mp_chat_draw_overlay()
 end
 
 -- ===== Animation Update =====
@@ -2267,6 +2484,10 @@ local ok, err = pcall(function()
     System.AddCCommand("mp_test_xgen_nullai", 'KCD2MP_TestXGenSpawn("NullAI")', "Test XGenAIModule.SpawnEntity ClassName=NullAI")
     System.AddCCommand("mp_test_xgen_npc",    'KCD2MP_TestXGenSpawn("NPC")',    "Test XGenAIModule.SpawnEntity ClassName=NPC")
     System.AddCCommand("mp_test_xgen_horse",  'KCD2MP_TestXGenSpawn("Horse")',  "Test XGenAIModule.SpawnEntity ClassName=Horse")
+    System.AddCCommand("mp_chat",             'KCD2MP_SubmitChatFromConsole("%LINE")', "Send chat line (/me /do /try /ooc /w)")
+    System.AddCCommand("mp_chat_open",        "KCD2MP_SetChatInputOpen(true)",   "Open chat overlay/input")
+    System.AddCCommand("mp_chat_close",       "KCD2MP_SetChatInputOpen(false)",  "Close chat overlay/input")
+    System.AddCCommand("mp_chat_draft",       'KCD2MP_SetChatDraft("%LINE")',    "Set chat draft text")
     System.LogAlways("[KCD2-MP] Commands OK")
 end)
 if not ok then
@@ -2288,6 +2509,66 @@ local SNEAK_HOLD_ACTIONS = {
     action_sneak=true, action_stealth=true,
     sneaking=true, stealth_mode=true,
 }
+local CHAT_OPEN_ACTIONS = {
+    chat_init_with_focus=true,
+    chat_open=true,
+}
+local CHAT_CONFIRM_ACTIONS = {
+    enter=true, key_enter=true, kb_enter=true,
+    ui_confirm=true, chat_send=true,
+}
+local CHAT_CANCEL_ACTIONS = {
+    escape=true, key_escape=true, kb_escape=true,
+    ui_back=true, chat_cancel=true,
+}
+local CHAT_BACKSPACE_ACTIONS = {
+    backspace=true, key_backspace=true, kb_backspace=true,
+}
+local CHAT_SPACE_ACTIONS = {
+    space=true, key_space=true, kb_space=true,
+}
+local CHAT_CHAR_ACTION_MAP = {
+    a="a", key_a="a", kb_a="a",
+    b="b", key_b="b", kb_b="b",
+    c="c", key_c="c", kb_c="c",
+    d="d", key_d="d", kb_d="d",
+    e="e", key_e="e", kb_e="e",
+    f="f", key_f="f", kb_f="f",
+    g="g", key_g="g", kb_g="g",
+    h="h", key_h="h", kb_h="h",
+    i="i", key_i="i", kb_i="i",
+    j="j", key_j="j", kb_j="j",
+    k="k", key_k="k", kb_k="k",
+    l="l", key_l="l", kb_l="l",
+    m="m", key_m="m", kb_m="m",
+    n="n", key_n="n", kb_n="n",
+    o="o", key_o="o", kb_o="o",
+    p="p", key_p="p", kb_p="p",
+    q="q", key_q="q", kb_q="q",
+    r="r", key_r="r", kb_r="r",
+    s="s", key_s="s", kb_s="s",
+    t="t", key_t="t", kb_t="t",
+    u="u", key_u="u", kb_u="u",
+    v="v", key_v="v", kb_v="v",
+    w="w", key_w="w", kb_w="w",
+    x="x", key_x="x", kb_x="x",
+    y="y", key_y="y", kb_y="y",
+    z="z", key_z="z", kb_z="z",
+    num0="0", key_0="0", kb_0="0",
+    num1="1", key_1="1", kb_1="1",
+    num2="2", key_2="2", kb_2="2",
+    num3="3", key_3="3", kb_3="3",
+    num4="4", key_4="4", kb_4="4",
+    num5="5", key_5="5", kb_5="5",
+    num6="6", key_6="6", kb_6="6",
+    num7="7", key_7="7", kb_7="7",
+    num8="8", key_8="8", kb_8="8",
+    num9="9", key_9="9", kb_9="9",
+    slash="/", key_slash="/", kb_slash="/",
+    minus="-", key_minus="-", kb_minus="-",
+    period=".", key_period=".", kb_period=".",
+    comma=",", key_comma=",", kb_comma=",",
+}
 
 -- Analog axis actions - ignore completely, they flood the log
 local AXIS_ACTIONS = {
@@ -2296,10 +2577,66 @@ local AXIS_ACTIONS = {
     move_lx=true, move_ly=true,
 }
 
+local function _kcd2mp_chat_handle_action(action, activation, value)
+    local act = string.lower(tostring(action or ""))
+    if act == "" then return false end
+    local pressed = (activation == "press" or activation == "hold" or activation == 1 or activation == 2)
+    if not pressed then return false end
+
+    if CHAT_OPEN_ACTIONS[act] then
+        KCD2MP_ToggleChatInput()
+        return true
+    end
+    if not KCD2MP.chat.inputOpen then
+        return false
+    end
+
+    if CHAT_CANCEL_ACTIONS[act] then
+        KCD2MP_SetChatInputOpen(false)
+        return true
+    end
+    if CHAT_CONFIRM_ACTIONS[act] then
+        KCD2MP_SubmitChatInput(KCD2MP.chat.draftText or "")
+        return true
+    end
+    if CHAT_BACKSPACE_ACTIONS[act] then
+        local draft = KCD2MP.chat.draftText or ""
+        if string.len(draft) > 0 then
+            KCD2MP.chat.draftText = string.sub(draft, 1, -2)
+            _kcd2mp_chat_touch_overlay(12)
+        end
+        return true
+    end
+    if CHAT_SPACE_ACTIONS[act] then
+        local draft = KCD2MP.chat.draftText or ""
+        if string.len(draft) < KCD2MP.chat.maxDraftLength then
+            KCD2MP.chat.draftText = draft .. " "
+            _kcd2mp_chat_touch_overlay(12)
+        end
+        return true
+    end
+
+    local ch = CHAT_CHAR_ACTION_MAP[act]
+    if ch then
+        local draft = KCD2MP.chat.draftText or ""
+        if string.len(draft) < KCD2MP.chat.maxDraftLength then
+            KCD2MP.chat.draftText = draft .. ch
+            _kcd2mp_chat_touch_overlay(12)
+        end
+        return true
+    end
+
+    return false
+end
+
 local function handleAction(action, activation, value)
     if AXIS_ACTIONS[action] then return end
     if KCD2MP.logActions then
         mp_log(string.format("ACT '%s' a=%s", tostring(action), tostring(activation)))
+    end
+
+    if _kcd2mp_chat_handle_action(action, activation, value) then
+        return
     end
 
     -- Toggle-style: each press of C flips sneak on/off
