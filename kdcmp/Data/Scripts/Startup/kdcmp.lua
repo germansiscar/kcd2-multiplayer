@@ -20,17 +20,40 @@ KCD2MP.pendingDamageEvents = {}
 KCD2MP.ghostEntityIds = {}  -- maps entity ID -> ghost player ID
 local mp_log
 
--- ===== FT-032: Ingame Chat GUI State =====
+-- ===== FT-033: RP Chat Input UX =====
 KCD2MP.chat = {
     keybindHint = "Y",
+    modeToggleKeyHint = "K",
     inputOpen = false,
     draftText = "",
+    speechMode = "normal",
+    canSpeakNormally = true,
+    lastLifecycleState = "Unknown",
     pendingSubmissions = {},
+    inputHistory = {},
+    inputHistoryCursor = nil,
+    maxInputHistory = 30,
     history = {},
     maxHistory = 60,
     maxVisible = 10,
     maxDraftLength = 280,
     overlayVisibleUntil = 0,
+}
+
+local CHAT_SUPPORTED_COMMANDS = {
+    ["/me"] = true,
+    ["/do"] = true,
+    ["/try"] = true,
+    ["/ooc"] = true,
+    ["/w"] = true,
+}
+
+local CHAT_PASSTHROUGH_COMMANDS = {
+    ["/whisper"] = true,
+    ["/shout"] = true,
+    ["/sys"] = true,
+    ["/pay"] = true,
+    ["/say"] = true,
 }
 
 local function _kcd2mp_trim(value)
@@ -40,9 +63,25 @@ local function _kcd2mp_trim(value)
     return text
 end
 
+local function _kcd2mp_json_escape(value)
+    local text = tostring(value or "")
+    text = string.gsub(text, "\\", "\\\\")
+    text = string.gsub(text, "\"", "\\\"")
+    text = string.gsub(text, "\n", "\\n")
+    text = string.gsub(text, "\r", "\\r")
+    text = string.gsub(text, "\t", "\\t")
+    return text
+end
+
 local function _kcd2mp_chat_touch_overlay(seconds)
     local ttl = seconds or 10
     KCD2MP.chat.overlayVisibleUntil = os.clock() + ttl
+end
+
+local function _kcd2mp_chat_mode_label(mode)
+    if mode == "whisper" then return "SUSURRO" end
+    if mode == "shout" then return "GRITO" end
+    return "NORMAL"
 end
 
 local function _kcd2mp_chat_read_json_string(jsonStr, key)
@@ -92,6 +131,198 @@ local function _kcd2mp_chat_push_entry(channel, senderName, lineText)
     _kcd2mp_chat_touch_overlay(12)
 end
 
+local function _kcd2mp_chat_push_input_history(line)
+    local clean = _kcd2mp_trim(line)
+    if clean == "" then return end
+    local history = KCD2MP.chat.inputHistory
+    local last = history[#history]
+    if last ~= clean then
+        table.insert(history, clean)
+        while #history > KCD2MP.chat.maxInputHistory do
+            table.remove(history, 1)
+        end
+    end
+    KCD2MP.chat.inputHistoryCursor = nil
+end
+
+local function _kcd2mp_chat_recall_history(step)
+    local history = KCD2MP.chat.inputHistory
+    if not history or #history == 0 then
+        return false
+    end
+
+    local cursor = KCD2MP.chat.inputHistoryCursor
+    if step < 0 then
+        if cursor == nil then
+            cursor = #history + 1
+        end
+        cursor = math.max(1, cursor - 1)
+        KCD2MP.chat.inputHistoryCursor = cursor
+        KCD2MP.chat.draftText = tostring(history[cursor] or "")
+        _kcd2mp_chat_touch_overlay(12)
+        return true
+    end
+
+    if cursor == nil then
+        return true
+    end
+
+    cursor = cursor + 1
+    if cursor > #history then
+        KCD2MP.chat.inputHistoryCursor = nil
+        KCD2MP.chat.draftText = ""
+        _kcd2mp_chat_touch_overlay(12)
+        return true
+    end
+
+    KCD2MP.chat.inputHistoryCursor = cursor
+    KCD2MP.chat.draftText = tostring(history[cursor] or "")
+    _kcd2mp_chat_touch_overlay(12)
+    return true
+end
+
+local function _kcd2mp_chat_has_active_character()
+    local state = KCD2MP.serverProjectionState
+    if not state or type(state.session) ~= "string" then
+        return false
+    end
+    local characterId = state.session:match('"characterId"%s*:%s*"([^"]+)"')
+    return characterId ~= nil and characterId ~= ""
+end
+
+local function _kcd2mp_chat_parse_local_intent(rawLine)
+    local line = _kcd2mp_trim(rawLine)
+    if line == "" then
+        return nil, "Entrada de chat vacia.", "chat_empty"
+    end
+    if string.len(line) > KCD2MP.chat.maxDraftLength then
+        return nil, "El mensaje supera el limite de longitud.", "chat_too_long"
+    end
+    if not _kcd2mp_chat_has_active_character() then
+        return nil, "Sesion o personaje activo no listos para chat.", "chat_session_context_missing"
+    end
+
+    local payload = {
+        raw = line,
+        text = line,
+        speechMode = tostring(KCD2MP.chat.speechMode or "normal"),
+        inputKind = "normal",
+        recognizedCommand = "",
+        channelHint = "local",
+    }
+
+    if string.sub(line, 1, 1) == "/" then
+        local command = string.lower(line:match("^(/%S+)") or "")
+        payload.inputKind = "command"
+        payload.recognizedCommand = command
+
+        if command == "" then
+            return nil, "Comando invalido.", "chat_invalid_channel"
+        end
+
+        if command == "/w" then
+            local target, text = line:match("^/%S+%s+(%S+)%s+(.+)$")
+            if not target or _kcd2mp_trim(target) == "" or not text or _kcd2mp_trim(text) == "" then
+                return nil, "Uso: /w <personaje> <mensaje>", "chat_whisper_format_invalid"
+            end
+            payload.channelHint = "direct_whisper"
+            payload.targetCharacterName = _kcd2mp_trim(target)
+            payload.text = line
+            return payload, nil, nil
+        end
+
+        local content = _kcd2mp_trim(string.sub(line, string.len(command) + 1))
+        if CHAT_SUPPORTED_COMMANDS[command] then
+            if content == "" then
+                return nil, "Formato invalido del comando.", "chat_command_format_invalid"
+            end
+            payload.text = line
+            if command == "/ooc" then
+                payload.channelHint = "global_ooc"
+            elseif command == "/me" then
+                payload.channelHint = "rp_me"
+            elseif command == "/do" then
+                payload.channelHint = "rp_do"
+            elseif command == "/try" then
+                payload.channelHint = "rp_try"
+            end
+            return payload, nil, nil
+        end
+
+        if CHAT_PASSTHROUGH_COMMANDS[command] then
+            payload.channelHint = "custom_command"
+            payload.text = line
+            return payload, nil, nil
+        end
+
+        return nil, "Comando invalido. Usa /me /do /try /ooc /w", "chat_invalid_channel"
+    end
+
+    if KCD2MP.chat.canSpeakNormally == false then
+        return nil, "No puedes hablar en este estado. Usa /ooc, /me, /do o /try.", "chat_unconscious_restricted_local"
+    end
+
+    local mode = payload.speechMode
+    if mode == "whisper" then
+        payload.channelHint = "local_whisper"
+        payload.text = "/whisper " .. line
+    elseif mode == "shout" then
+        payload.channelHint = "local_shout"
+        payload.text = "/shout " .. line
+    else
+        payload.channelHint = "local"
+        payload.text = line
+    end
+
+    if string.len(payload.text) > KCD2MP.chat.maxDraftLength then
+        return nil, "El mensaje supera el limite de longitud para este modo.", "chat_too_long_mode"
+    end
+
+    return payload, nil, nil
+end
+
+local function _kcd2mp_chat_encode_payload(payload)
+    local parts = {}
+    parts[#parts + 1] = '"text":"' .. _kcd2mp_json_escape(payload.text or "") .. '"'
+    parts[#parts + 1] = '"raw":"' .. _kcd2mp_json_escape(payload.raw or "") .. '"'
+    parts[#parts + 1] = '"speechMode":"' .. _kcd2mp_json_escape(payload.speechMode or "normal") .. '"'
+    parts[#parts + 1] = '"inputKind":"' .. _kcd2mp_json_escape(payload.inputKind or "normal") .. '"'
+    parts[#parts + 1] = '"recognizedCommand":"' .. _kcd2mp_json_escape(payload.recognizedCommand or "") .. '"'
+    parts[#parts + 1] = '"channelHint":"' .. _kcd2mp_json_escape(payload.channelHint or "local") .. '"'
+    if payload.targetCharacterName and payload.targetCharacterName ~= "" then
+        parts[#parts + 1] = '"targetCharacterName":"' .. _kcd2mp_json_escape(payload.targetCharacterName) .. '"'
+    end
+    return "{" .. table.concat(parts, ",") .. "}"
+end
+
+function KCD2MP_CycleChatSpeechMode()
+    local current = tostring(KCD2MP.chat.speechMode or "normal")
+    local nextMode = "normal"
+    if current == "normal" then
+        nextMode = "whisper"
+    elseif current == "whisper" then
+        nextMode = "shout"
+    else
+        nextMode = "normal"
+    end
+    KCD2MP.chat.speechMode = nextMode
+    _kcd2mp_chat_touch_overlay(12)
+    _kcd2mp_chat_push_entry("system", "", "Modo de habla: " .. _kcd2mp_chat_mode_label(nextMode))
+    mp_log("CHAT_MODE_CHANGED " .. tostring(nextMode))
+    return nextMode
+end
+
+function KCD2MP_SetChatSpeechMode(mode)
+    local normalized = string.lower(_kcd2mp_trim(mode))
+    if normalized ~= "normal" and normalized ~= "whisper" and normalized ~= "shout" then
+        return false
+    end
+    KCD2MP.chat.speechMode = normalized
+    _kcd2mp_chat_touch_overlay(12)
+    mp_log("CHAT_MODE_SET " .. tostring(normalized))
+    return true
+end
+
 function KCD2MP_SetChatInputOpen(isOpen)
     local open = (isOpen == true or isOpen == 1 or isOpen == "1" or isOpen == "true")
     if KCD2MP.chat.inputOpen == open then
@@ -101,6 +332,7 @@ function KCD2MP_SetChatInputOpen(isOpen)
     KCD2MP.chat.inputOpen = open
     _kcd2mp_chat_touch_overlay(12)
     if open then
+        KCD2MP.chat.inputHistoryCursor = nil
         mp_log("CHAT_GUI_OPEN")
     else
         mp_log("CHAT_GUI_CLOSE")
@@ -121,25 +353,31 @@ function KCD2MP_SetChatDraft(text)
 end
 
 function KCD2MP_SubmitChatInput(text)
-    local line = _kcd2mp_trim(text)
-    if line == "" then
-        _kcd2mp_chat_push_entry("system", "", "Entrada de chat vacia.")
-        mp_log("CHAT_INPUT_ERROR empty")
+    local original = _kcd2mp_trim(text)
+    mp_log("CHAT_INPUT_CAPTURED len=" .. tostring(string.len(original)))
+
+    local payload, errorText, errorCode = _kcd2mp_chat_parse_local_intent(original)
+    if not payload then
+        _kcd2mp_chat_push_entry("system", "", tostring(errorText or "Entrada de chat invalida."))
+        mp_log("CHAT_PARSE_ERROR " .. tostring(errorCode or "unknown"))
+        mp_log("CHAT_LOCAL_REJECT " .. tostring(errorCode or "unknown"))
         return false
     end
-    if string.len(line) > KCD2MP.chat.maxDraftLength then
-        line = string.sub(line, 1, KCD2MP.chat.maxDraftLength)
-    end
-    table.insert(KCD2MP.chat.pendingSubmissions, line)
+
+    local encodedPayload = _kcd2mp_chat_encode_payload(payload)
+    table.insert(KCD2MP.chat.pendingSubmissions, encodedPayload)
     KCD2MP.chat.draftText = ""
+    _kcd2mp_chat_push_input_history(original)
     KCD2MP_SetChatInputOpen(false)
 
-    local cmd = line:match("^(/%S+)")
-    if cmd then
+    local cmd = payload.recognizedCommand or ""
+    if cmd ~= "" then
+        mp_log("CHAT_COMMAND_RECOGNIZED " .. tostring(cmd))
         mp_log("CHAT_COMMAND_SENT " .. tostring(cmd))
     else
-        mp_log("CHAT_MESSAGE_SENT len=" .. tostring(string.len(line)))
+        mp_log("CHAT_MESSAGE_SENT len=" .. tostring(string.len(payload.text or "")))
     end
+    mp_log("CHAT_SEND_TO_SERVER mode=" .. tostring(payload.speechMode or "normal"))
     return true
 end
 
@@ -151,8 +389,20 @@ function KCD2MP_PopPendingChatInput()
     if not KCD2MP.chat.pendingSubmissions or #KCD2MP.chat.pendingSubmissions == 0 then
         return ""
     end
-    local line = table.remove(KCD2MP.chat.pendingSubmissions, 1)
-    return tostring(line or "")
+    local payload = table.remove(KCD2MP.chat.pendingSubmissions, 1)
+    if type(payload) ~= "string" then
+        return ""
+    end
+    local text = payload:match('"text"%s*:%s*"([^"]*)"') or ""
+    return tostring(text or "")
+end
+
+function KCD2MP_PopPendingChatPayload()
+    if not KCD2MP.chat.pendingSubmissions or #KCD2MP.chat.pendingSubmissions == 0 then
+        return ""
+    end
+    local payload = table.remove(KCD2MP.chat.pendingSubmissions, 1)
+    return tostring(payload or "")
 end
 
 function KCD2MP_AppendChatMessage(jsonStr)
@@ -174,6 +424,9 @@ function KCD2MP_AppendChatMessage(jsonStr)
 
     if line and line ~= "" then
         _kcd2mp_chat_push_entry(channel, sender, line)
+        if string.find(channel, "^chat_") or string.find(channel, "^economy_transfer_") then
+            mp_log("CHAT_REMOTE_REJECT " .. tostring(channel))
+        end
     end
     return true
 end
@@ -221,14 +474,19 @@ local function _kcd2mp_chat_draw_overlay()
 
     if chat.inputOpen then
         local draft = tostring(chat.draftText or "")
+        local modeLabel = _kcd2mp_chat_mode_label(chat.speechMode or "normal")
+        local speakHint = (chat.canSpeakNormally == false) and "BLOQUEADO" or "OK"
         pcall(function()
             System.DrawText(baseX, y + 4, "> " .. draft .. "_", 1.3)
         end)
         pcall(function()
-            System.DrawText(baseX, y + 18, "Enter: enviar | Esc: cerrar | Soporta /me /do /try /ooc /w", 1.0)
+            System.DrawText(baseX, y + 18, "Modo: " .. modeLabel .. " (" .. tostring(chat.modeToggleKeyHint or "K") .. ") | Estado habla: " .. speakHint, 1.0)
+        end)
+        pcall(function()
+            System.DrawText(baseX, y + 30, "Enter: enviar | Esc: cerrar | Historial: Arriba/Abajo | Soporta /me /do /try /ooc /w", 1.0)
         end)
     else
-        local hint = "Pulsa " .. tostring(chat.keybindHint or "Y") .. " para abrir chat. Rapido: mp_chat <texto>"
+        local hint = "Pulsa " .. tostring(chat.keybindHint or "Y") .. " para abrir chat. Modo: " .. _kcd2mp_chat_mode_label(chat.speechMode or "normal") .. " (" .. tostring(chat.modeToggleKeyHint or "K") .. ")"
         pcall(function()
             System.DrawText(baseX, y + 4, hint, 1.0)
         end)
@@ -2488,6 +2746,8 @@ local ok, err = pcall(function()
     System.AddCCommand("mp_chat_open",        "KCD2MP_SetChatInputOpen(true)",   "Open chat overlay/input")
     System.AddCCommand("mp_chat_close",       "KCD2MP_SetChatInputOpen(false)",  "Close chat overlay/input")
     System.AddCCommand("mp_chat_draft",       'KCD2MP_SetChatDraft("%LINE")',    "Set chat draft text")
+    System.AddCCommand("mp_chat_mode",        'KCD2MP_SetChatSpeechMode("%LINE")', "Set chat speech mode: normal|whisper|shout")
+    System.AddCCommand("mp_chat_mode_cycle",  "KCD2MP_CycleChatSpeechMode()",    "Cycle chat speech mode")
     System.LogAlways("[KCD2-MP] Commands OK")
 end)
 if not ok then
@@ -2526,6 +2786,18 @@ local CHAT_BACKSPACE_ACTIONS = {
 }
 local CHAT_SPACE_ACTIONS = {
     space=true, key_space=true, kb_space=true,
+}
+local CHAT_HISTORY_PREV_ACTIONS = {
+    up=true, key_up=true, kb_up=true,
+}
+local CHAT_HISTORY_NEXT_ACTIONS = {
+    down=true, key_down=true, kb_down=true,
+}
+local CHAT_MODE_CYCLE_ACTIONS = {
+    chat_mode_cycle=true,
+    chat_mode_toggle=true,
+    key_k=true,
+    kb_k=true,
 }
 local CHAT_CHAR_ACTION_MAP = {
     a="a", key_a="a", kb_a="a",
@@ -2587,6 +2859,12 @@ local function _kcd2mp_chat_handle_action(action, activation, value)
         KCD2MP_ToggleChatInput()
         return true
     end
+
+    if (not KCD2MP.chat.inputOpen) and CHAT_MODE_CYCLE_ACTIONS[act] then
+        KCD2MP_CycleChatSpeechMode()
+        return true
+    end
+
     if not KCD2MP.chat.inputOpen then
         return false
     end
@@ -2614,6 +2892,12 @@ local function _kcd2mp_chat_handle_action(action, activation, value)
             _kcd2mp_chat_touch_overlay(12)
         end
         return true
+    end
+    if CHAT_HISTORY_PREV_ACTIONS[act] then
+        return _kcd2mp_chat_recall_history(-1)
+    end
+    if CHAT_HISTORY_NEXT_ACTIONS[act] then
+        return _kcd2mp_chat_recall_history(1)
     end
 
     local ch = CHAT_CHAR_ACTION_MAP[act]
@@ -3023,8 +3307,10 @@ function KCD2MP_ApplyLifecycleProjection(jsonStr)
     if not defeatState or defeatState == "" then
         return _kcd2mp_projection_result("not_applicable", "missing_defeat_state", "defeatState is required")
     end
+    KCD2MP.chat.lastLifecycleState = defeatState
 
     if defeatState == "Alive" then
+        KCD2MP.chat.canSpeakNormally = true
         return _kcd2mp_projection_result("applied", "lifecycle_alive", "No local lifecycle transition required")
     end
 
@@ -3033,8 +3319,11 @@ function KCD2MP_ApplyLifecycleProjection(jsonStr)
     end)
 
     if defeatState == "Unconscious" or defeatState == "PendingRespawn" or defeatState == "Respawning" then
+        KCD2MP.chat.canSpeakNormally = false
         return _kcd2mp_projection_result("partial", "lifecycle_visual_only", "Lifecycle reflected as local informational state")
     end
+
+    KCD2MP.chat.canSpeakNormally = true
 
     return _kcd2mp_projection_result("partial", "lifecycle_unknown_state", "Lifecycle state reflected with limited runtime mapping")
 end

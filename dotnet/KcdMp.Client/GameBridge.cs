@@ -91,6 +91,13 @@ public partial class GameBridge(
         bool ForcedCorrection,
         long? CurrencyBalance,
         IReadOnlyList<InventoryRuntimeItem> RuntimeItems);
+    private sealed record ChatPreparedInput(
+        string Text,
+        string Raw,
+        string SpeechMode,
+        string InputKind,
+        string RecognizedCommand,
+        string ChannelHint);
 
     public async Task RunAsync(CancellationToken ct = default)
     {
@@ -471,33 +478,74 @@ public partial class GameBridge(
             {
                 await ExecLuaAsync(
                     $@"System.SetCVar(""{ChatSubmitCvarName}"",(function()
-local fn = KCD2MP_PopPendingChatInput
-if type(fn) ~= 'function' then return '' end
-local value = fn()
+local fnPayload = KCD2MP_PopPendingChatPayload
+local fnLegacy = KCD2MP_PopPendingChatInput
+local value = ''
+if type(fnPayload) == 'function' then
+    value = fnPayload()
+elseif type(fnLegacy) == 'function' then
+    value = fnLegacy()
+else
+    return ''
+end
 if not value then return '' end
 value = tostring(value)
 if value == '' then return '' end
 return value
 end)())");
 
-                var rawInput = await ReadCvarValueAsync(ChatSubmitCvarName);
-                if (!string.IsNullOrWhiteSpace(rawInput))
+                var rawPayload = await ReadCvarValueAsync(ChatSubmitCvarName);
+                if (!string.IsNullOrWhiteSpace(rawPayload))
                 {
-                    var text = rawInput.Trim();
-                    var payload = JsonSerializer.SerializeToUtf8Bytes(new { text });
-                    await stream.WriteAsync(PacketWriter.Event((ushort)EventType.ChatSubmit, payload), ct);
+                    var prepared = TryParsePreparedChatPayload(rawPayload);
+                    byte[] payload;
+                    string text;
+                    string command;
+                    string mode;
+                    string inputKind;
+                    string channelHint;
 
-                    if (text.StartsWith("/", StringComparison.Ordinal))
+                    if (prepared is not null)
                     {
-                        var firstSpace = text.IndexOf(' ');
-                        var command = firstSpace > 0 ? text[..firstSpace] : text;
-                        if (string.IsNullOrWhiteSpace(command))
-                            command = "/unknown";
-                        _logger.Information("[chat-ui] command sent {Command}", command);
+                        text = prepared.Text;
+                        command = prepared.RecognizedCommand;
+                        mode = prepared.SpeechMode;
+                        inputKind = prepared.InputKind;
+                        channelHint = prepared.ChannelHint;
+                        payload = Encoding.UTF8.GetBytes(rawPayload.Trim());
                     }
                     else
                     {
-                        _logger.Information("[chat-ui] message sent length={Length}", text.Length);
+                        text = rawPayload.Trim();
+                        if (text.StartsWith("/", StringComparison.Ordinal))
+                        {
+                            var firstSpace = text.IndexOf(' ');
+                            command = firstSpace > 0 ? text[..firstSpace] : text;
+                            if (string.IsNullOrWhiteSpace(command))
+                                command = "/unknown";
+                        }
+                        else
+                        {
+                            command = string.Empty;
+                        }
+                        mode = "normal";
+                        inputKind = command.Length > 0 ? "command" : "normal";
+                        channelHint = "legacy";
+                        payload = JsonSerializer.SerializeToUtf8Bytes(new { text });
+                    }
+
+                    if (string.IsNullOrWhiteSpace(text))
+                    {
+                        _logger.Warning("[chat-ui] local reject empty text payload");
+                    }
+                    else
+                    {
+                        await stream.WriteAsync(PacketWriter.Event((ushort)EventType.ChatSubmit, payload), ct);
+                        _logger.Information("[chat-ui] input sent kind={InputKind} mode={Mode} channelHint={ChannelHint} len={Length}",
+                            inputKind, mode, channelHint, text.Length);
+
+                        if (!string.IsNullOrWhiteSpace(command))
+                            _logger.Information("[chat-ui] command recognized {Command}", command);
                     }
                 }
             }
@@ -1207,6 +1255,9 @@ end");
                 case EventType.ChatMessage:
                 {
                     var line = TryReadChatLine(json);
+                    var channel = TryReadChatChannel(json);
+                    if (IsChatRejectionChannel(channel))
+                        _logger.Warning("[chat-ui] remote rejection channel={Channel}", channel);
                     await RenderChatMessageAsync(json, line);
                     break;
                 }
@@ -1242,6 +1293,90 @@ end");
         {
             return null;
         }
+    }
+
+    private static ChatPreparedInput? TryParsePreparedChatPayload(string rawPayload)
+    {
+        if (string.IsNullOrWhiteSpace(rawPayload))
+            return null;
+
+        var trimmed = rawPayload.Trim();
+        if (!trimmed.StartsWith('{'))
+            return null;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(trimmed);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+                return null;
+
+            var text = root.TryGetProperty("text", out var textNode) && textNode.ValueKind == JsonValueKind.String
+                ? textNode.GetString() ?? string.Empty
+                : string.Empty;
+            var raw = root.TryGetProperty("raw", out var rawNode) && rawNode.ValueKind == JsonValueKind.String
+                ? rawNode.GetString() ?? string.Empty
+                : string.Empty;
+            var mode = root.TryGetProperty("speechMode", out var modeNode) && modeNode.ValueKind == JsonValueKind.String
+                ? modeNode.GetString() ?? "normal"
+                : "normal";
+            var inputKind = root.TryGetProperty("inputKind", out var kindNode) && kindNode.ValueKind == JsonValueKind.String
+                ? kindNode.GetString() ?? "normal"
+                : "normal";
+            var command = root.TryGetProperty("recognizedCommand", out var cmdNode) && cmdNode.ValueKind == JsonValueKind.String
+                ? cmdNode.GetString() ?? string.Empty
+                : string.Empty;
+            var channelHint = root.TryGetProperty("channelHint", out var channelNode) && channelNode.ValueKind == JsonValueKind.String
+                ? channelNode.GetString() ?? "local"
+                : "local";
+
+            if (string.IsNullOrWhiteSpace(text))
+                return null;
+
+            return new ChatPreparedInput(
+                text.Trim(),
+                raw.Trim(),
+                mode.Trim(),
+                inputKind.Trim(),
+                command.Trim(),
+                channelHint.Trim());
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string? TryReadChatChannel(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+                return null;
+
+            if (root.TryGetProperty("channel", out var channelNode) && channelNode.ValueKind == JsonValueKind.String)
+                return channelNode.GetString();
+
+            return null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static bool IsChatRejectionChannel(string? channel)
+    {
+        if (string.IsNullOrWhiteSpace(channel))
+            return false;
+
+        return channel.StartsWith("chat_", StringComparison.OrdinalIgnoreCase)
+            || channel.StartsWith("economy_transfer_", StringComparison.OrdinalIgnoreCase)
+            || channel.StartsWith("access_", StringComparison.OrdinalIgnoreCase)
+            || channel.StartsWith("identity_", StringComparison.OrdinalIgnoreCase)
+            || channel.StartsWith("character_", StringComparison.OrdinalIgnoreCase);
     }
 
     // -------------------------------------------------------------------------
