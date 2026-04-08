@@ -7,4 +7,6 @@ public enum EventType : ushort
     PlayerDowned = 3,
     Revive       = 4,
     NpcDamage    = 5,
+    ChatSubmit   = 100,
+    ChatMessage  = 101,
 }

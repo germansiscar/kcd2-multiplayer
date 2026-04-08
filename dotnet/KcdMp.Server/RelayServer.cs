@@ -7,6 +7,7 @@ using KcdMp.Server.Admin;
 using KcdMp.Server.Audit;
 using KcdMp.Server.Bans;
 using KcdMp.Server.Characters;
+using KcdMp.Server.Communication;
 using KcdMp.Server.Currency;
 using KcdMp.Server.Identity;
 using KcdMp.Server.Inventory;
@@ -53,6 +54,9 @@ public class RelayServer
     private readonly Dictionary<Guid, PresenceSpatialSnapshot> _presenceSpatialBySession = [];
     private readonly Dictionary<Guid, PresenceSnapshotEntry> _lastPresenceBySession = [];
     private readonly HashSet<Guid> _presenceWorldReadySessions = [];
+    private readonly ServerCommunicationOptions _communicationOptions;
+    private readonly Dictionary<Guid, Queue<DateTimeOffset>> _chatRateBuckets = [];
+    private readonly Random _chatRandom = new();
 
     public RelayServer(
         int port,
@@ -84,6 +88,7 @@ public class RelayServer
         ICharacterCurrencyService? characterCurrencyService = null,
         ICharacterRespawnService? characterRespawnService = null,
         IInventoryRulesConfigurationService? inventoryRulesService = null,
+        ServerCommunicationOptions? communicationOptions = null,
         bool worldInitEnabled = true,
         int worldInitMaxRetries = 1,
         bool worldInitBlockOnCriticalFailure = true,
@@ -104,6 +109,7 @@ public class RelayServer
         _worldInitBlockOnCriticalFailure = worldInitBlockOnCriticalFailure;
         _worldInitSkillsPerksMode = string.IsNullOrWhiteSpace(worldInitSkillsPerksMode) ? "pending" : worldInitSkillsPerksMode.Trim();
         _worldInitReapplyOnZoneLoad = worldInitReapplyOnZoneLoad;
+        _communicationOptions = communicationOptions ?? new ServerCommunicationOptions();
         _sessionBackend = new ServerSessionBackend(sessionIdleTimeout);
         _sessionBackend.LifecycleEventEmitted += HandleSessionLifecycleEvent;
         if (observability is not null)
@@ -248,7 +254,10 @@ public class RelayServer
                     HandleCharacterLifecycleOnSessionClose(session.SessionId, session.CloseReason);
                     RemovePendingProjectionsForSession(session.SessionId);
                     lock (_lock)
+                    {
                         _presenceWorldReadySessions.Remove(session.SessionId);
+                        _chatRateBuckets.Remove(session.SessionId);
+                    }
                     _sessionBackend.CloseSession(session.SessionId, session.CloseReason);
                     _logger.Information("[-] {Client} disconnected. Clients: {ClientCount}. Reason: {CloseReason}. SessionId: {SessionId}",
                         session.Name ?? $"id={session.Id}", _clients.Count, session.CloseReason, session.SessionId);
@@ -446,6 +455,181 @@ public class RelayServer
         var packet = PacketWriter.EventRelay(source.Id, eventType, jsonPayload);
         foreach (var target in targets)
             target.EnqueueRaw(packet);
+    }
+
+    internal async Task HandleClientEventAsync(
+        ClientSession source,
+        ushort eventType,
+        byte[] jsonPayload,
+        CancellationToken ct = default)
+    {
+        if (eventType != (ushort)EventType.ChatSubmit)
+        {
+            BroadcastEvent(source, eventType, jsonPayload);
+            return;
+        }
+
+        await HandleChatSubmitAsync(source, jsonPayload, ct);
+    }
+
+    private async Task HandleChatSubmitAsync(ClientSession source, byte[] jsonPayload, CancellationToken ct)
+    {
+        var rawText = ExtractChatText(jsonPayload);
+        if (string.IsNullOrWhiteSpace(rawText))
+        {
+            await SendSystemChatAsync(source, "Mensaje vacio.", "chat_empty");
+            EmitChatEvent(ServerObservableEventType.ChatMessageRejected, source.SessionId, source.Id, "chat_empty", null, null);
+            return;
+        }
+
+        var trimmed = rawText.Trim();
+        if (trimmed.Length > _communicationOptions.MaxMessageLength)
+            trimmed = trimmed[.._communicationOptions.MaxMessageLength];
+
+        if (!TryConsumeChatRateToken(source.SessionId, DateTimeOffset.UtcNow))
+        {
+            await SendSystemChatAsync(source, "Rate limit de chat alcanzado. Espera un momento.", "chat_rate_limited");
+            EmitChatEvent(ServerObservableEventType.ChatRateLimitTriggered, source.SessionId, source.Id, "chat_rate_limited", null, null);
+            return;
+        }
+
+        var senderSession = _sessionBackend.GetActiveSessions().FirstOrDefault(x => x.SessionId == source.SessionId);
+        if (senderSession is null || string.IsNullOrWhiteSpace(senderSession.IdentityId) || string.IsNullOrWhiteSpace(senderSession.CharacterId))
+        {
+            await SendSystemChatAsync(source, "Sesion sin contexto de personaje activo.", "chat_session_context_missing");
+            EmitChatEvent(ServerObservableEventType.ChatMessageRejected, source.SessionId, source.Id, "chat_session_context_missing", null, null);
+            return;
+        }
+
+        var identity = await _identityService.GetByInternalIdAsync(senderSession.IdentityId!, ct);
+        var character = await _characterProfileService.GetByInternalIdAsync(senderSession.CharacterId!, ct);
+        if (identity is null || character is null)
+        {
+            await SendSystemChatAsync(source, "No se pudo resolver la identidad del mensaje.", "chat_sender_identity_missing");
+            EmitChatEvent(ServerObservableEventType.ChatMessageRejected, source.SessionId, source.Id, "chat_sender_identity_missing", null, null);
+            return;
+        }
+
+        var command = ParseChatCommand(trimmed);
+        if (command.Kind == ChatCommandKind.Invalid)
+        {
+            await SendSystemChatAsync(source, "Canal/comando de chat invalido.", "chat_invalid_channel");
+            EmitChatEvent(ServerObservableEventType.ChatInvalidChannel, source.SessionId, source.Id, "chat_invalid_channel", null, null);
+            return;
+        }
+
+        if (command.Kind == ChatCommandKind.System && identity.Role != PlayerIdentityRole.Admin)
+        {
+            await SendSystemChatAsync(source, "Solo admins pueden usar /sys.", "chat_admin_required");
+            EmitChatEvent(ServerObservableEventType.ChatMessageRejected, source.SessionId, source.Id, "chat_admin_required", null, null);
+            return;
+        }
+
+        var respawn = await _characterRespawnService.GetLoadedForSessionAsync(source.SessionId, ct);
+        var isUnconscious = respawn?.State == CharacterDefeatState.Unconscious;
+        if (isUnconscious && !command.AllowedWhileUnconscious)
+        {
+            await SendSystemChatAsync(source, "No puedes hablar en este estado. Usa /ooc, /me, /do o /try.", "chat_unconscious_restricted");
+            EmitChatEvent(ServerObservableEventType.ChatMessageRejected, source.SessionId, source.Id, "chat_unconscious_restricted", null, null);
+            return;
+        }
+
+        var senderSpatial = TryGetSpatial(source.SessionId);
+        if (command.RequiresSpatialContext && senderSpatial is null)
+        {
+            await SendSystemChatAsync(source, "Contexto de presencia no listo para chat local.", "chat_presence_missing");
+            EmitChatEvent(ServerObservableEventType.ChatMessageRejected, source.SessionId, source.Id, "chat_presence_missing", null, null);
+            return;
+        }
+
+        var senderZone = senderSpatial is null ? null : ComputeZoneKey(senderSpatial.X, senderSpatial.Y);
+        var senderName = string.IsNullOrWhiteSpace(character.FullName) ? source.Name ?? "Unknown" : character.FullName;
+        IReadOnlyList<ClientSession> recipients;
+
+        if (command.Kind == ChatCommandKind.WhisperDirect)
+        {
+            var target = await ResolveWhisperTargetAsync(source.SessionId, command.TargetHint ?? "", ct);
+            if (target is null)
+            {
+                await SendSystemChatAsync(source, "Jugador objetivo no encontrado para /w.", "chat_whisper_target_missing");
+                EmitChatEvent(ServerObservableEventType.ChatMessageRejected, source.SessionId, source.Id, "chat_whisper_target_missing", null, null);
+                return;
+            }
+
+            if (senderSpatial is null || target.Spatial is null)
+            {
+                await SendSystemChatAsync(source, "No hay contexto espacial valido para /w.", "chat_whisper_presence_missing");
+                EmitChatEvent(ServerObservableEventType.ChatMessageRejected, source.SessionId, source.Id, "chat_whisper_presence_missing", null, null);
+                return;
+            }
+
+            var sameZone = string.Equals(senderZone, ComputeZoneKey(target.Spatial.X, target.Spatial.Y), StringComparison.Ordinal);
+            var distance = ComputeDistance(senderSpatial, target.Spatial);
+            if (!sameZone || distance > _communicationOptions.ProximityWhisperRadius)
+            {
+                await SendSystemChatAsync(source, "El objetivo de /w esta fuera de alcance.", "chat_whisper_out_of_range");
+                EmitChatEvent(ServerObservableEventType.ChatMessageRejected, source.SessionId, source.Id, "chat_whisper_out_of_range", null, distance);
+                return;
+            }
+
+            recipients = source.SessionId == target.Client.SessionId
+                ? [target.Client]
+                : [source, target.Client];
+        }
+        else if (command.Scope == ChatScope.Global || command.Scope == ChatScope.System)
+        {
+            lock (_lock)
+                recipients = [.. _clients.Where(c => c.IsReady)];
+        }
+        else
+        {
+            recipients = ResolveProximityRecipients(source, senderSpatial!, command.Mode);
+        }
+
+        if (recipients.Count == 0)
+            recipients = [source];
+
+        var messageId = $"chat_{Guid.NewGuid():N}";
+        var tryOutcome = command.Kind == ChatCommandKind.Try ? RollTryOutcome() : (bool?)null;
+        var formatted = FormatChatLine(command, senderName, command.Content, tryOutcome);
+
+        var payloadObject = new
+        {
+            messageId,
+            channel = command.Channel,
+            scope = command.Scope.ToString().ToLowerInvariant(),
+            mode = command.Mode.ToString().ToLowerInvariant(),
+            senderCharacterId = character.InternalId,
+            senderCharacterName = senderName,
+            senderIdentityId = identity.InternalId,
+            senderTransportClientId = source.Id,
+            text = command.Content,
+            formatted,
+            tryOutcome,
+            zone = senderZone,
+            timestampUtc = DateTimeOffset.UtcNow,
+        };
+
+        var json = JsonSerializer.SerializeToUtf8Bytes(payloadObject);
+        var packet = PacketWriter.EventRelay(source.Id, (ushort)EventType.ChatMessage, json);
+        foreach (var recipient in recipients)
+            recipient.EnqueueRaw(packet);
+
+        EmitChatEvent(
+            ServerObservableEventType.ChatMessageAccepted,
+            source.SessionId,
+            source.Id,
+            command.Channel,
+            recipients.Count,
+            null,
+            command.Content);
+        EmitChatEvent(
+            ServerObservableEventType.ChatMessageDelivered,
+            source.SessionId,
+            source.Id,
+            command.Channel,
+            recipients.Count,
+            null);
     }
 
     public IReadOnlyList<ServerSessionRecord> GetActiveSessions()
@@ -1757,6 +1941,307 @@ public class RelayServer
             Payload: payload));
     }
 
+    private static string ExtractChatText(byte[] jsonPayload)
+    {
+        var raw = Encoding.UTF8.GetString(jsonPayload);
+        if (string.IsNullOrWhiteSpace(raw))
+            return string.Empty;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(raw);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+                return raw;
+
+            if (root.TryGetProperty("text", out var textNode) && textNode.ValueKind == JsonValueKind.String)
+                return textNode.GetString() ?? string.Empty;
+
+            if (root.TryGetProperty("message", out var messageNode) && messageNode.ValueKind == JsonValueKind.String)
+                return messageNode.GetString() ?? string.Empty;
+
+            return raw;
+        }
+        catch
+        {
+            return raw;
+        }
+    }
+
+    private ChatCommand ParseChatCommand(string text)
+    {
+        if (!text.StartsWith('/'))
+            return new ChatCommand(ChatCommandKind.LocalNormal, ChatScope.Proximity, ChatProximityMode.Normal, "local", text, null, AllowedWhileUnconscious: false, RequiresSpatialContext: true);
+
+        var parts = text.Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 0)
+            return ChatCommand.Invalid();
+
+        var cmd = parts[0].Trim().ToLowerInvariant();
+        switch (cmd)
+        {
+            case "/ooc":
+            {
+                var content = parts.Length >= 2 ? text[(parts[0].Length + 1)..].Trim() : string.Empty;
+                return string.IsNullOrWhiteSpace(content)
+                    ? ChatCommand.Invalid()
+                    : new ChatCommand(ChatCommandKind.Ooc, ChatScope.Global, ChatProximityMode.Normal, "global_ooc", content, null, AllowedWhileUnconscious: true, RequiresSpatialContext: false);
+            }
+            case "/me":
+            {
+                var content = parts.Length >= 2 ? text[(parts[0].Length + 1)..].Trim() : string.Empty;
+                return string.IsNullOrWhiteSpace(content)
+                    ? ChatCommand.Invalid()
+                    : new ChatCommand(ChatCommandKind.Me, ChatScope.Proximity, ChatProximityMode.Normal, "rp_me", content, null, AllowedWhileUnconscious: true, RequiresSpatialContext: true);
+            }
+            case "/do":
+            {
+                var content = parts.Length >= 2 ? text[(parts[0].Length + 1)..].Trim() : string.Empty;
+                return string.IsNullOrWhiteSpace(content)
+                    ? ChatCommand.Invalid()
+                    : new ChatCommand(ChatCommandKind.Do, ChatScope.Proximity, ChatProximityMode.Normal, "rp_do", content, null, AllowedWhileUnconscious: true, RequiresSpatialContext: true);
+            }
+            case "/try":
+            {
+                var content = parts.Length >= 2 ? text[(parts[0].Length + 1)..].Trim() : string.Empty;
+                return string.IsNullOrWhiteSpace(content)
+                    ? ChatCommand.Invalid()
+                    : new ChatCommand(ChatCommandKind.Try, ChatScope.Proximity, ChatProximityMode.Normal, "rp_try", content, null, AllowedWhileUnconscious: true, RequiresSpatialContext: true);
+            }
+            case "/w":
+            {
+                if (parts.Length < 3)
+                    return ChatCommand.Invalid();
+                return new ChatCommand(ChatCommandKind.WhisperDirect, ChatScope.Direct, ChatProximityMode.Whisper, "direct_whisper", parts[2].Trim(), parts[1].Trim(), AllowedWhileUnconscious: false, RequiresSpatialContext: true);
+            }
+            case "/shout":
+            case "/s":
+            {
+                var content = parts.Length >= 2 ? text[(parts[0].Length + 1)..].Trim() : string.Empty;
+                return string.IsNullOrWhiteSpace(content)
+                    ? ChatCommand.Invalid()
+                    : new ChatCommand(ChatCommandKind.LocalShout, ChatScope.Proximity, ChatProximityMode.Shout, "local_shout", content, null, AllowedWhileUnconscious: false, RequiresSpatialContext: true);
+            }
+            case "/whisper":
+            {
+                var content = parts.Length >= 2 ? text[(parts[0].Length + 1)..].Trim() : string.Empty;
+                return string.IsNullOrWhiteSpace(content)
+                    ? ChatCommand.Invalid()
+                    : new ChatCommand(ChatCommandKind.LocalWhisper, ChatScope.Proximity, ChatProximityMode.Whisper, "local_whisper", content, null, AllowedWhileUnconscious: false, RequiresSpatialContext: true);
+            }
+            case "/sys":
+            {
+                var content = parts.Length >= 2 ? text[(parts[0].Length + 1)..].Trim() : string.Empty;
+                return string.IsNullOrWhiteSpace(content)
+                    ? ChatCommand.Invalid()
+                    : new ChatCommand(ChatCommandKind.System, ChatScope.System, ChatProximityMode.Normal, "system", content, null, AllowedWhileUnconscious: true, RequiresSpatialContext: false);
+            }
+            default:
+                return ChatCommand.Invalid();
+        }
+    }
+
+    private bool TryConsumeChatRateToken(Guid sessionId, DateTimeOffset nowUtc)
+    {
+        lock (_lock)
+        {
+            if (!_chatRateBuckets.TryGetValue(sessionId, out var queue))
+            {
+                queue = new Queue<DateTimeOffset>();
+                _chatRateBuckets[sessionId] = queue;
+            }
+
+            var threshold = nowUtc - _communicationOptions.RateLimitWindow;
+            while (queue.Count > 0 && queue.Peek() < threshold)
+                queue.Dequeue();
+
+            if (queue.Count >= _communicationOptions.RateLimitMaxMessages)
+                return false;
+
+            queue.Enqueue(nowUtc);
+            return true;
+        }
+    }
+
+    private PresenceSpatialSnapshot? TryGetSpatial(Guid sessionId)
+    {
+        lock (_lock)
+        {
+            _presenceSpatialBySession.TryGetValue(sessionId, out var spatial);
+            return spatial;
+        }
+    }
+
+    private IReadOnlyList<ClientSession> ResolveProximityRecipients(
+        ClientSession source,
+        PresenceSpatialSnapshot senderSpatial,
+        ChatProximityMode mode)
+    {
+        var radius = mode switch
+        {
+            ChatProximityMode.Whisper => _communicationOptions.ProximityWhisperRadius,
+            ChatProximityMode.Shout => _communicationOptions.ProximityShoutRadius,
+            _ => _communicationOptions.ProximityNormalRadius,
+        };
+
+        var senderZone = ComputeZoneKey(senderSpatial.X, senderSpatial.Y);
+        List<ClientSession> candidates;
+        Dictionary<Guid, PresenceSpatialSnapshot> spatialBySession;
+        lock (_lock)
+        {
+            candidates = [.. _clients.Where(c => c.IsReady)];
+            spatialBySession = new Dictionary<Guid, PresenceSpatialSnapshot>(_presenceSpatialBySession);
+        }
+
+        var recipients = new List<ClientSession>(capacity: candidates.Count);
+        foreach (var client in candidates)
+        {
+            if (client.SessionId == source.SessionId)
+            {
+                recipients.Add(client);
+                continue;
+            }
+
+            if (!spatialBySession.TryGetValue(client.SessionId, out var targetSpatial))
+                continue;
+            if (!string.Equals(senderZone, ComputeZoneKey(targetSpatial.X, targetSpatial.Y), StringComparison.Ordinal))
+                continue;
+            if (ComputeDistance(senderSpatial, targetSpatial) > radius)
+                continue;
+
+            recipients.Add(client);
+        }
+
+        return recipients;
+    }
+
+    private async Task<WhisperTarget?> ResolveWhisperTargetAsync(Guid senderSessionId, string targetHint, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(targetHint))
+            return null;
+
+        List<ClientSession> candidates;
+        lock (_lock)
+            candidates = [.. _clients.Where(c => c.IsReady && c.SessionId != senderSessionId)];
+
+        WhisperTarget? match = null;
+        foreach (var candidate in candidates)
+        {
+            var session = _sessionBackend.GetActiveSessions().FirstOrDefault(x => x.SessionId == candidate.SessionId);
+            if (session is null || string.IsNullOrWhiteSpace(session.CharacterId))
+                continue;
+
+            var character = await _characterProfileService.GetByInternalIdAsync(session.CharacterId!, ct);
+            if (character is null)
+                continue;
+
+            if (!character.FullName.Contains(targetHint, StringComparison.OrdinalIgnoreCase)
+                && !(candidate.Name?.Contains(targetHint, StringComparison.OrdinalIgnoreCase) ?? false))
+            {
+                continue;
+            }
+
+            var spatial = TryGetSpatial(candidate.SessionId);
+            if (match is not null)
+                return null; // Ambiguous whisper target.
+
+            match = new WhisperTarget(candidate, character.FullName, spatial);
+        }
+
+        return match;
+    }
+
+    private string ComputeZoneKey(float x, float y)
+    {
+        var cell = Math.Max(1f, _communicationOptions.ProximityZoneCellSize);
+        var zx = (int)Math.Floor(x / cell);
+        var zy = (int)Math.Floor(y / cell);
+        return $"{zx}:{zy}";
+    }
+
+    private static double ComputeDistance(PresenceSpatialSnapshot a, PresenceSpatialSnapshot b)
+    {
+        var dx = a.X - b.X;
+        var dy = a.Y - b.Y;
+        var dz = a.Z - b.Z;
+        return Math.Sqrt((dx * dx) + (dy * dy) + (dz * dz));
+    }
+
+    private bool RollTryOutcome()
+    {
+        lock (_chatRandom)
+            return _chatRandom.Next(0, 100) >= 50;
+    }
+
+    private static string FormatChatLine(ChatCommand command, string senderName, string text, bool? tryOutcome)
+    {
+        return command.Kind switch
+        {
+            ChatCommandKind.Ooc => $"[OOC] {senderName}: {text}",
+            ChatCommandKind.Me => $"* {senderName} {text}",
+            ChatCommandKind.Do => $"[DO] {text} ({senderName})",
+            ChatCommandKind.Try => $"[TRY] {senderName} {text} => {(tryOutcome == true ? "EXITO" : "FALLO")}",
+            ChatCommandKind.LocalWhisper or ChatCommandKind.WhisperDirect => $"[Susurro] {senderName}: {text}",
+            ChatCommandKind.LocalShout => $"[Grito] {senderName}: {text}",
+            ChatCommandKind.System => $"[SYSTEM] {text}",
+            _ => $"{senderName}: {text}",
+        };
+    }
+
+    private async Task SendSystemChatAsync(ClientSession target, string text, string channel)
+    {
+        var payload = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            messageId = $"sys_{Guid.NewGuid():N}",
+            channel,
+            scope = "system",
+            mode = "normal",
+            senderCharacterId = "system",
+            senderCharacterName = "SYSTEM",
+            senderIdentityId = "system",
+            senderTransportClientId = 0,
+            text,
+            formatted = $"[SYSTEM] {text}",
+            tryOutcome = (bool?)null,
+            zone = (string?)null,
+            timestampUtc = DateTimeOffset.UtcNow,
+        });
+
+        target.EnqueueRaw(PacketWriter.EventRelay(0, (ushort)EventType.ChatMessage, payload));
+        await Task.CompletedTask;
+    }
+
+    private void EmitChatEvent(
+        ServerObservableEventType eventType,
+        Guid sessionId,
+        byte sourceClientId,
+        string channel,
+        int? recipientCount,
+        double? distance,
+        string? text = null)
+    {
+        var payload = new Dictionary<string, object?>
+        {
+            ["transport_client_id"] = sourceClientId,
+            ["channel"] = channel,
+            ["recipient_count"] = recipientCount,
+            ["distance"] = distance,
+        };
+
+        if (_communicationOptions.AuditIncludeMessageText && !string.IsNullOrWhiteSpace(text))
+            payload["text"] = text;
+
+        Emit(
+            eventType,
+            ServerObservableComponent.Networking,
+            eventType is ServerObservableEventType.ChatMessageRejected or ServerObservableEventType.ChatRateLimitTriggered or ServerObservableEventType.ChatInvalidChannel
+                ? ServerObservableSeverity.Warning
+                : ServerObservableSeverity.Information,
+            "Server communication event.",
+            sessionId,
+            payload);
+    }
+
     private sealed record PresenceSpatialSnapshot(
         float X,
         float Y,
@@ -1782,4 +2267,52 @@ public class RelayServer
         byte[] JsonPayload,
         int Attempt,
         int MaxRetries);
+
+    private enum ChatCommandKind
+    {
+        Invalid = 0,
+        LocalNormal = 1,
+        LocalWhisper = 2,
+        LocalShout = 3,
+        Me = 4,
+        Do = 5,
+        Try = 6,
+        Ooc = 7,
+        WhisperDirect = 8,
+        System = 9,
+    }
+
+    private enum ChatScope
+    {
+        Proximity = 0,
+        Global = 1,
+        Direct = 2,
+        System = 3,
+    }
+
+    private enum ChatProximityMode
+    {
+        Normal = 0,
+        Whisper = 1,
+        Shout = 2,
+    }
+
+    private sealed record ChatCommand(
+        ChatCommandKind Kind,
+        ChatScope Scope,
+        ChatProximityMode Mode,
+        string Channel,
+        string Content,
+        string? TargetHint,
+        bool AllowedWhileUnconscious,
+        bool RequiresSpatialContext)
+    {
+        public static ChatCommand Invalid()
+            => new(ChatCommandKind.Invalid, ChatScope.Proximity, ChatProximityMode.Normal, "invalid", string.Empty, null, false, false);
+    }
+
+    private sealed record WhisperTarget(
+        ClientSession Client,
+        string CharacterName,
+        PresenceSpatialSnapshot? Spatial);
 }

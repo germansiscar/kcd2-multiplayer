@@ -882,9 +882,46 @@ end)())");
                         "Game.SendInfoText(\"You have been revived!\")");
                     break;
                 }
+
+                case EventType.ChatMessage:
+                {
+                    var line = TryReadChatLine(json);
+                    if (!string.IsNullOrWhiteSpace(line))
+                        await NotifyUserAsync(line!);
+                    break;
+                }
             }
         }
         catch (Exception ex) { _logger.Warning(ex, "[event-in] Error handling event {Type}", (EventType)eventType); }
+    }
+
+    private static string? TryReadChatLine(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+                return null;
+
+            if (root.TryGetProperty("formatted", out var formatted) && formatted.ValueKind == JsonValueKind.String)
+                return formatted.GetString();
+
+            var sender = root.TryGetProperty("senderCharacterName", out var senderNode) && senderNode.ValueKind == JsonValueKind.String
+                ? senderNode.GetString()
+                : null;
+            var text = root.TryGetProperty("text", out var textNode) && textNode.ValueKind == JsonValueKind.String
+                ? textNode.GetString()
+                : null;
+            if (string.IsNullOrWhiteSpace(text))
+                return null;
+
+            return string.IsNullOrWhiteSpace(sender) ? text : $"{sender}: {text}";
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     // -------------------------------------------------------------------------

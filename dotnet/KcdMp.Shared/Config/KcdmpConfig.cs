@@ -29,6 +29,14 @@ public class KcdmpConfig
     public bool WorldInitBlockOnCriticalFailure { get; set; } = true;
     public string WorldInitSkillsPerksMode { get; set; } = "pending";
     public bool WorldInitReapplyOnZoneLoad { get; set; } = true;
+    public int ChatMaxMessageLength { get; set; } = 280;
+    public int ChatRateLimitMaxMessages { get; set; } = 6;
+    public int ChatRateLimitWindowMs { get; set; } = 4000;
+    public float ChatProximityNormalRadius { get; set; } = 25f;
+    public float ChatProximityWhisperRadius { get; set; } = 10f;
+    public float ChatProximityShoutRadius { get; set; } = 60f;
+    public float ChatProximityZoneCellSize { get; set; } = 120f;
+    public bool ChatAuditIncludeMessageText { get; set; } = false;
     public long CurrencyInitialBalance { get; set; } = 0;
     public int CurrencySaveRetryCount { get; set; } = 1;
     public int CurrencySaveRetryDelayMs { get; set; } = 100;

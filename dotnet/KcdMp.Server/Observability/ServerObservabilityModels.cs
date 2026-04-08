@@ -112,6 +112,11 @@ public enum ServerObservableEventType
     WorldInitializationCompleted = 89,
     WorldInitializationFailed = 90,
     WorldInitializationBlocked = 91,
+    ChatMessageAccepted = 92,
+    ChatMessageDelivered = 93,
+    ChatMessageRejected = 94,
+    ChatRateLimitTriggered = 95,
+    ChatInvalidChannel = 96,
 }
 
 public sealed record ServerObservableEvent(

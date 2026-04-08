@@ -2,6 +2,7 @@ using KcdMp.Client;
 using KcdMp.Server.AccessControl;
 using KcdMp.Server.Audit;
 using KcdMp.Server.Characters;
+using KcdMp.Server.Communication;
 using KcdMp.Server.Currency;
 using KcdMp.Server.Identity;
 using KcdMp.Server;
@@ -74,6 +75,17 @@ var respawnOptions = new CharacterRespawnOptions
     SaveRetryCount = config.RespawnSaveRetryCount,
     SaveRetryDelay = TimeSpan.FromMilliseconds(Math.Max(0, config.RespawnSaveRetryDelayMs)),
 };
+var communicationOptions = new ServerCommunicationOptions
+{
+    MaxMessageLength = Math.Max(32, config.ChatMaxMessageLength),
+    RateLimitMaxMessages = Math.Max(1, config.ChatRateLimitMaxMessages),
+    RateLimitWindow = TimeSpan.FromMilliseconds(Math.Max(500, config.ChatRateLimitWindowMs)),
+    ProximityNormalRadius = Math.Max(1f, config.ChatProximityNormalRadius),
+    ProximityWhisperRadius = Math.Max(1f, config.ChatProximityWhisperRadius),
+    ProximityShoutRadius = Math.Max(1f, config.ChatProximityShoutRadius),
+    ProximityZoneCellSize = Math.Max(1f, config.ChatProximityZoneCellSize),
+    AuditIncludeMessageText = config.ChatAuditIncludeMessageText,
+};
 
 if (config.Mode == "host")
 {
@@ -84,6 +96,16 @@ if (config.Mode == "host")
     Log.Information("Audit enabled: {Enabled} (retention days: {RetentionDays})", auditOptions.Enabled, auditOptions.RetentionDays);
     Log.Information("Currency initial balance: {Balance}", currencyOptions.InitialBalance);
     Log.Information("Respawn unconscious duration (s): {Duration}", respawnOptions.UnconsciousDuration.TotalSeconds);
+    Log.Information(
+        "Communication: maxLen={MaxLen}, rate={Rate}/{WindowMs}ms, radius(normal={Normal}, whisper={Whisper}, shout={Shout}), zoneCell={ZoneCell}, auditText={AuditText}",
+        communicationOptions.MaxMessageLength,
+        communicationOptions.RateLimitMaxMessages,
+        communicationOptions.RateLimitWindow.TotalMilliseconds,
+        communicationOptions.ProximityNormalRadius,
+        communicationOptions.ProximityWhisperRadius,
+        communicationOptions.ProximityShoutRadius,
+        communicationOptions.ProximityZoneCellSize,
+        communicationOptions.AuditIncludeMessageText);
     Log.Information(
         "World init: enabled={Enabled}, retries={Retries}, blockOnCriticalFailure={Block}, skillsPerksMode={Mode}, reapplyOnZoneLoad={Reapply}",
         config.WorldInitEnabled,
@@ -99,6 +121,7 @@ if (config.Mode == "host")
         accessControlOptions: accessControlOptions,
         identityOptions: identityOptions,
         characterBindingOptions: characterBindingOptions,
+        communicationOptions: communicationOptions,
         characterCurrencyOptions: currencyOptions,
         characterRespawnOptions: respawnOptions,
         worldInitEnabled: config.WorldInitEnabled,

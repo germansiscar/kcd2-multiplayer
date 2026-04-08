@@ -105,6 +105,22 @@ public class StateEventPacketTests
     }
 
     [Fact]
+    public void ChatEventRelay_RoundTrips()
+    {
+        byte sourceId = 4;
+        ushort eventType = (ushort)EventType.ChatMessage;
+        byte[] json = """{"channel":"global_ooc","formatted":"[OOC] Henry: Hola"}"""u8.ToArray();
+
+        var packet = PacketWriter.EventRelay(sourceId, eventType, json);
+
+        Assert.Equal((byte)PacketType.EventRelay, packet[0]);
+        var (parsedSrc, parsedType, parsedJson) = PacketReader.ParseEventRelay(packet[3..]);
+        Assert.Equal(sourceId, parsedSrc);
+        Assert.Equal(eventType, parsedType);
+        Assert.Equal(json, parsedJson);
+    }
+
+    [Fact]
     public void StateProjection_RoundTrips()
     {
         const uint projectionId = 42;

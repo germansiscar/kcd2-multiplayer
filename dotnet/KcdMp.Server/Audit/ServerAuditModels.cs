@@ -12,6 +12,7 @@ public enum ServerAuditCategory
     Respawn = 5,
     Persistence = 6,
     Error = 7,
+    Communication = 8,
 }
 
 public enum ServerAuditResult

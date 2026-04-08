@@ -549,3 +549,51 @@ Fecha de actualización: 2026-04-07
   - tests nuevos/actualizados en:
     - `dotnet/KcdMp.Tests/Integration/RelayServerTests.cs`
     - `dotnet/KcdMp.Tests/Config/KcdmpConfigTests.cs`
+
+### F30 / FT-030 - Comunicacion base RP (IMPLEMENTADA)
+
+- Estado: implementada en codigo + cubierta con tests de protocolo/integracion.
+- Reutiliza del repo actual:
+  - `dotnet/KcdMp.Server/RelayServer.cs` como orquestador server-driven de sesiones/presencia.
+  - `dotnet/KcdMp.Shared/Protocol/` para transporte de eventos cliente-servidor.
+  - `dotnet/KcdMp.Client/GameBridge.cs` para presentar mensajes en cliente sin mover logica canonica al runtime.
+- Nueva implementacion:
+  - extension de protocolo de eventos:
+    - `EventType.ChatSubmit`
+    - `EventType.ChatMessage`
+  - pipeline de comunicacion server-side en `RelayServer`:
+    - parseo de comandos (`/me`, `/do`, `/try`, `/ooc`, `/w`, `say`, `whisper`, `shout`, `/sys` admin)
+    - control de identidad de emisor basado en personaje activo
+    - filtro de elegibilidad por sesion/identidad/personaje
+    - restriccion de estado inconsciente (solo permite `/ooc`, `/me`, `/do`, `/try`)
+    - rate limiting basico por sesion (ventana deslizante)
+    - distribucion por alcance:
+      - global OOC / sistema
+      - proximidad (normal/susurro/grito)
+      - whisper directo `/w` con validacion de objetivo
+    - limite de zona/contexto por celda espacial para impedir cruces indebidos
+  - eventos observables nuevos:
+    - `ChatMessageAccepted`
+    - `ChatMessageDelivered`
+    - `ChatMessageRejected`
+    - `ChatRateLimitTriggered`
+    - `ChatInvalidChannel`
+  - integracion de auditoria:
+    - categoria `Communication`
+    - payload de texto opcional via config (`ChatAuditIncludeMessageText`), desactivado por defecto
+  - configuracion operativa nueva en `KcdmpConfig` + wiring en `Program.cs`:
+    - limites de longitud/rate
+    - radios de proximidad
+    - tamano de celda de zona
+    - inclusion opcional de texto en auditoria
+  - cliente:
+    - `GameBridge` recibe `EventType.ChatMessage` y muestra linea formateada enviada por servidor.
+- Refactor requerido:
+  - `ClientSession` deja de relayer eventos de forma ciega y delega al servidor el ruteo de eventos (`HandleClientEventAsync`).
+- Riesgo tecnico introducido:
+  - la proximidad usa ultimo snapshot espacial conocido por servidor (limitacion del modelo hibrido actual).
+  - el whisper `/w` usa resolucion basica por nombre visible (puede requerir UX/indices dedicados en iteraciones futuras).
+- Evidencia:
+  - tests nuevos/actualizados en:
+    - `dotnet/KcdMp.Tests/Protocol/StateEventPacketTests.cs`
+    - `dotnet/KcdMp.Tests/Integration/RelayServerTests.cs`

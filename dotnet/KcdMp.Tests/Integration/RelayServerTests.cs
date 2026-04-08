@@ -151,6 +151,46 @@ public class RelayServerTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Client_SendsChatSubmit_OtherClientReceivesChatMessage()
+    {
+        var (tcp1, s1, _) = await ConnectClientAsync("AliceChat");
+        var (tcp2, s2, _) = await ConnectClientAsync("BobChat");
+        using var _ = tcp1;
+        using var __ = tcp2;
+
+        await DrainPacketsAsync(s1, 1);
+        await DrainPacketsAsync(s2, 1);
+
+        byte[] chatJson = """{"text":"/ooc hola mundo"}"""u8.ToArray();
+        await s1.WriteAsync(PacketWriter.Event((ushort)EventType.ChatSubmit, chatJson));
+
+        var packet = await ReadPacketByTypeAsync(s2, PacketType.EventRelay, TimeSpan.FromSeconds(2));
+        var (_, parsedEvt, parsedJson) = PacketReader.ParseEventRelay(packet.Payload);
+        Assert.Equal((ushort)EventType.ChatMessage, parsedEvt);
+        var payload = System.Text.Encoding.UTF8.GetString(parsedJson);
+        Assert.Contains("\"channel\":\"global_ooc\"", payload, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("[OOC]", payload, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Client_SendsInvalidChatCommand_ReceivesSystemRejection()
+    {
+        var (tcp, stream, _) = await ConnectClientAsync("InvalidChat");
+        using var _ = tcp;
+
+        byte[] chatJson = """{"text":"/unknown comando"}"""u8.ToArray();
+        await stream.WriteAsync(PacketWriter.Event((ushort)EventType.ChatSubmit, chatJson));
+
+        var packet = await ReadPacketByTypeAsync(stream, PacketType.EventRelay, TimeSpan.FromSeconds(2));
+        var (srcId, parsedEvt, parsedJson) = PacketReader.ParseEventRelay(packet.Payload);
+        Assert.Equal(0, srcId);
+        Assert.Equal((ushort)EventType.ChatMessage, parsedEvt);
+        var payload = System.Text.Encoding.UTF8.GetString(parsedJson);
+        Assert.Contains("\"scope\":\"system\"", payload, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("invalido", payload, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Client_ReceivesInitialStateProjection_AndCanReportApplyResult()
     {
         using var tcp = new TcpClient();

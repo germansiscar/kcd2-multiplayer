@@ -282,6 +282,12 @@ public sealed class PersistentAuditObservabilitySink : IServerObservabilitySink
             ServerObservableEventType.AdminSessionKicked => ServerAuditCategory.Access,
             ServerObservableEventType.AdminAuditQueried => ServerAuditCategory.Access,
 
+            ServerObservableEventType.ChatMessageAccepted or
+            ServerObservableEventType.ChatMessageDelivered or
+            ServerObservableEventType.ChatMessageRejected or
+            ServerObservableEventType.ChatRateLimitTriggered or
+            ServerObservableEventType.ChatInvalidChannel => ServerAuditCategory.Communication,
+
             ServerObservableEventType.BackendError => ServerAuditCategory.Error,
             _ => default,
         };
@@ -324,6 +330,11 @@ public sealed class PersistentAuditObservabilitySink : IServerObservabilitySink
             ServerObservableEventType.PersistenceLoadFailed or
             ServerObservableEventType.AdminSessionKicked or
             ServerObservableEventType.AdminAuditQueried or
+            ServerObservableEventType.ChatMessageAccepted or
+            ServerObservableEventType.ChatMessageDelivered or
+            ServerObservableEventType.ChatMessageRejected or
+            ServerObservableEventType.ChatRateLimitTriggered or
+            ServerObservableEventType.ChatInvalidChannel or
             ServerObservableEventType.BackendError;
     }
 
@@ -346,6 +357,9 @@ public sealed class PersistentAuditObservabilitySink : IServerObservabilitySink
             ServerObservableEventType.PersistenceLoadFailed or
             ServerObservableEventType.PersistenceSaveFailed or
             ServerObservableEventType.AdminSessionKicked or
+            ServerObservableEventType.ChatMessageRejected or
+            ServerObservableEventType.ChatRateLimitTriggered or
+            ServerObservableEventType.ChatInvalidChannel or
             ServerObservableEventType.BackendError;
     }
 

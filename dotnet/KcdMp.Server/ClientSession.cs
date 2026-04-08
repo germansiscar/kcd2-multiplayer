@@ -151,7 +151,7 @@ public class ClientSession
 
                     case PacketType.Event when packet.Payload.Length >= 2:
                         var (eventType, jsonPayload) = PacketReader.ParseEvent(packet.Payload);
-                        _server.BroadcastEvent(this, eventType, jsonPayload);
+                        await _server.HandleClientEventAsync(this, eventType, jsonPayload);
                         break;
 
                     case PacketType.StateProjectionResult when packet.Payload.Length >= 6:
